@@ -1,0 +1,16 @@
+﻿GitHub one-click backup tool v4 - beginner instructions
+
+1. Copy the updated files into D:\GitHub-Backup-Tool.
+2. Double-click 07-RESTORE-CODEX-GIT-SETTINGS.cmd once.
+3. Double-click 05-ONE-CLICK-FULL-BACKUP.cmd for a complete update.
+4. Enter the SSH key passphrase once when asked.
+5. The tool automatically uses SSH port 443 only for this backup run.
+6. Whether the backup succeeds or fails, the temporary SSH agent and settings are cleared automatically.
+7. Double-click 08-CHECK-LAST-BACKUP.cmd to check the latest result.
+8. For later routine updates, use 06-ONE-CLICK-DAILY-UPDATE.cmd.
+
+Important:
+- The tool does not store your private key passphrase.
+- The tool does not modify global Git settings during backup.
+- Existing backups under D:\GitHub-Backups are not deleted.
+- PASS or PARTIAL with Failed=0 means the core repository backup succeeded.
