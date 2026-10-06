@@ -430,12 +430,36 @@ args_skip_spaces:
     IntOp $3 $3 + 1
     Goto args_skip_spaces
 args_option:
-    ; Only the documented final, unquoted directory option is accepted.
-    ; Extra switches/quotes/multiple directory options cannot equal the fixed root.
+    ; Accept only the standard silent switch and the exact fixed-root option.
+    ; /D= is install-only; _?= is uninstall-only. Both path options remain final.
+    StrCpy $4 $2 2 $3
+    StrCmp $4 '/S' args_silent
     StrCpy $4 $2 3 $3
     StrCmpS $4 '/D=' args_directory
     StrCmp $SetupMode 'uninstall' 0 args_done
-    StrCmpS $4 '_?=' 0 args_done
+    StrCmpS $4 '_?=' args_directory args_done
+args_silent:
+    StrCmp $SetupMode 'install' args_silent_mode_ok
+    StrCmp $SetupMode 'uninstall' 0 args_done
+args_silent_mode_ok:
+    IntOp $3 $3 + 2
+    StrCpy $4 $2 1 $3
+    StrCmp $4 "" args_accept
+    StrCmp $4 " " args_silent_skip
+    Goto args_done
+args_silent_skip:
+    IntOp $3 $3 + 1
+    StrCpy $4 $2 1 $3
+    StrCmp $4 " " args_silent_skip
+    StrCmp $4 "" args_accept
+    StrCmp $SetupMode 'install' 0 args_silent_uninstall_option
+    StrCpy $4 $2 3 $3
+    StrCmpS $4 '/D=' args_directory
+    Goto args_done
+args_silent_uninstall_option:
+    StrCpy $4 $2 3 $3
+    StrCmpS $4 '_?=' args_directory
+    Goto args_done
 args_directory:
     IntOp $3 $3 + 3
     StrCpy $4 $2 "" $3

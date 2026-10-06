@@ -6,7 +6,7 @@ A local backup app for AI creators who keep their own projects on GitHub. It hel
 
 As AI makes it easier to create more projects, it can become difficult to tell whether a complete local copy exists. This tool brings the backup steps into a Windows app where you can choose a destination, check prerequisites, and review each run.
 
-**This is an unsigned Windows preview, not a production release.** The latest fixed installer passed file-layout and checksum checks, but real installation, browser sign-in, and backup have not been accepted. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the versions, notes, and checksums that are actually available; the older preview ZIP does not include the latest installer fixes. Do not rely on a preview as the only copy of important files.
+**This is an unsigned Windows preview, not a production release.** The v4 installer passed static checks and was installed on the development PC, where the user confirmed a normal backup completed. Clean-PC use and backup restoration have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions, notes, and checksums that are actually available; the older preview ZIP does not include the v4 fixes. Do not rely on a preview as the only copy of important files.
 
 Contents: [About the project](#1-what-is-this-project) · [Example output](#2-what-does-a-backup-look-like) · [Who it is for](#3-who-is-it-for) · [Quick start](#6-installation-and-quick-start) · [Daily use](#7-how-to-use-it) · [Cautions and FAQ](#10-cautions-and-faq) · [Version status](#11-version-status) · [About the author](#13-about-the-author)
 
@@ -136,9 +136,7 @@ dotnet publish src/GitHubBackup.App/GitHubBackup.App.csproj --configuration Rele
 
 The current desktop app is an internal development preview. File metadata shows `1.0.0.0`; this is the executable's file version, not a validated stable `v1.0.0` release. The root [VERSION.txt](VERSION.txt) value `4.0.0-one-click-isolated-ssh443` applies only to earlier scripts.
 
-There is build evidence for rebuilding and publishing the app as a Windows x64 single-file `GitHubBackup.exe`. Its file format, checksum, and limited content checks passed, and embedded debug information was removed from the public candidate. The dependency window now explains when a tool already meets requirements, why installation may be unavailable without winget, and where to find the Microsoft Store. The project includes account binding, destination checks, two backup modes, and a Chinese-language interface.
-
-Not yet verified: real startup and exit, user-interface operation, running on a clean PC, real sign-in and backup, and whether the result can ultimately be restored. This preparation did not run the app or the complete test suite, so it cannot be described as fully validated.
+The v4 installer and bundled Windows x64 app passed static file verification. The old version was removed, v4 was installed on the development PC, and the user confirmed a normal backup completed. The related focused tests passed 269/269. This does not verify use on a clean PC or restoration of a backup; see the [public verification record](docs/verification/setup-installer.md).
 
 The latest setup preview is unsigned. Check its matching [GitHub Releases entry](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the available file and SHA-256 value. Real-profile installation and uninstall acceptance remain outstanding. Next, evaluate restore and legacy Git-configuration cleanup tools; planned features are not current capabilities. See the [public verification record](docs/verification/setup-installer.md).
 
@@ -210,7 +208,7 @@ Checking the box only means that you agree to the download and license terms; yo
 
 ### What if the network connection fails?
 
-The app uses network settings for the current process and tries the Windows system proxy for certain connection failures; it does not change global Git settings. This cannot resolve every network issue. Account permissions, certificate errors, and GitHub rate limits differ from an ordinary disconnection; follow the prompt or wait rather than repeatedly switching proxies.
+For timeouts, refused connections, and resets, the app retries according to its policy and may try the Windows system proxy when applicable. Network settings are limited to the current backup and do not change global Git settings. This cannot resolve every issue; follow the prompt or wait for account-permission, certificate, or GitHub rate-limit errors.
 
 ### Can these backups replace all GitHub data?
 
@@ -218,7 +216,7 @@ No. Workflow records are not the same as every Actions run log or build artifact
 
 ### Can I install, use this commercially, or redistribute it?
 
-Original project source code is licensed under the [MIT License](LICENSE). You may copy, modify, distribute, and commercially use that source, provided you retain the copyright and license notices. This license covers only original project source code; third-party components retain their own licenses, and it does not grant rights to third-party trademarks or the author-introduction image. The latest preview installer passed static file verification, but it is unsigned. Installation, uninstall, sign-in, and backup in a real Windows user profile have not been accepted. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the matching version and checksum.
+Original project source code is licensed under the [MIT License](LICENSE). You may copy, modify, distribute, and commercially use that source, provided you retain the copyright and license notices. This license covers only original project source code; third-party components retain their own licenses, and it does not grant rights to third-party trademarks or the author-introduction image. The v4 preview installer is unsigned. It was installed on the development PC, where the user confirmed a normal backup completed; clean-PC use and restore have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions and checksums that are actually available.
 
 Third-party runtime and installer-build-tool licenses are listed in [NOTICE.txt](publish/Setup/NOTICE.txt). That notice is not a license for this project's source. Do not remove license notices distributed with the app or disable security protections to dismiss warnings.
 
@@ -226,9 +224,9 @@ Third-party runtime and installer-build-tool licenses are listed in [NOTICE.txt]
 
 The desktop app is an internal development preview. File metadata shows `1.0.0.0`; that is the executable's file version, not a validated stable `v1.0.0` release. The root [VERSION.txt](VERSION.txt) value `4.0.0-one-click-isolated-ssh443` applies only to earlier scripts.
 
-Completed with build evidence: the Windows x64 single-file app and a local `GitHubBackup-setup.exe` installer were built. The installer adds Desktop and Start Menu shortcuts plus a current-user uninstall entry, and passed static file verification. Browser sign-in now opens GitHub's device page automatically with manual fallback instructions, and the main window starts at the top. The focused test set passed 117/117.
+Completed with build evidence: the v4 Windows x64 installer was built and passed static file verification. The old version was uninstalled, v4 was installed on the development PC, and the user confirmed a normal backup completed. For eligible network interruptions, the app retries and may try the Windows system proxy. The related test set passed 269 tests.
 
-Not yet verified: installation/uninstallation in a real Windows user profile, the actual Installed apps display, real sign-in and backup, clean-machine use, and whether a backup can be restored. The preview installer is unsigned, so static checks and simulated tests are not full user acceptance. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the currently available download and SHA-256.
+Not yet verified: use on a clean PC, installation on other computers or accounts, and whether a backup can be fully restored. The preview installer is unsigned; a successful backup on one PC does not prove that every account, network, or repository will work. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for an actually published download and SHA-256.
 
 The [releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) is the download source; choose only a version whose notes and SHA-256 match the installer fixes you need. Restore and legacy Git-configuration cleanup tools remain future work, not current capabilities. See the [installer verification record](docs/verification/setup-installer.md) for evidence and unverified areas.
 

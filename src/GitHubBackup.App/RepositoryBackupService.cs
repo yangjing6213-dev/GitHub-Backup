@@ -6,6 +6,12 @@ namespace GitHubBackup.App;
 
 internal sealed record RepositoryStepResult(bool CoreFailed,int WarningCount,int SkippedWikiCount,IReadOnlyList<string> ErrorCodes,bool Critical=false,bool Cancelled=false);
 
+internal sealed class MirrorBackupException(string code, string diagnosticCode) : IOException(code)
+{
+    internal string Code { get; } = code;
+    internal string DiagnosticCode { get; } = diagnosticCode;
+}
+
 internal sealed class BackupRunContext : IAsyncDisposable
 {
     private readonly PreflightSession session;
@@ -59,11 +65,20 @@ internal sealed class BackupRunContext : IAsyncDisposable
         return wiki?endpoint.CanonicalWikiUrl:endpoint.CanonicalCloneUrl;
     }
     internal MirrorPaths Paths(RepositoryDescriptor repository,bool wiki,string? runId=null)=>new(OwnerRoot,repository.LocalName,wiki,runId??RunId);
-    internal IReadOnlyDictionary<string,string?> EnvironmentFor(string endpoint,StagingRepository? staging,bool recovery=false)
+    internal IReadOnlyDictionary<string,string?> EnvironmentFor(string endpoint,StagingRepository? staging,bool recovery=false,string? lfsHooks=null)
     {
+        if(lfsHooks is not null && (recovery || staging is null
+            || Path.GetDirectoryName(lfsHooks)!=staging.Root || !Path.GetFileName(lfsHooks).StartsWith(".lfs-hooks-",StringComparison.Ordinal)))
+            throw new ArgumentException("LFS_HOOK_DIRECTORY_INVALID");
         var environment=recovery?Recovery.Environment:session.CreateEnvironment();
-        return BuildGitEnvironment(environment,session.Snapshot.EmptyHooksDirectory!,endpoint,staging,recovery?Recovery:null);
+        return BuildGitEnvironment(environment,lfsHooks??session.Snapshot.EmptyHooksDirectory!,endpoint,staging,recovery?Recovery:null);
     }
+    internal IReadOnlyDictionary<string,string?>? WindowsSystemProxyFallbackEnvironmentFor(string endpoint,StagingRepository? staging,string? lfsHooks=null)
+    {
+        var environment=session.CreateSystemProxyFallbackEnvironment();
+        return environment is null?null:BuildGitEnvironment(environment,lfsHooks??session.Snapshot.EmptyHooksDirectory!,endpoint,staging,null);
+    }
+    internal void MarkWindowsSystemProxyFallbackSucceeded()=>session.MarkSystemProxyFallbackSucceeded();
     internal static IReadOnlyDictionary<string,string?> BuildGitEnvironment(IReadOnlyDictionary<string,string?> environment,string hooks,string endpoint,StagingRepository? staging,RecoveryLease? recovery)
     {
         string proxy=environment.TryGetValue("HTTPS_PROXY",out var https)?https??"":environment.TryGetValue("ALL_PROXY",out var all)?all??"":"";
@@ -141,7 +156,7 @@ internal sealed class RepositoryBackupService(IProcessRunner runner,Action<Promo
                 if(!clone.Success)
                 {
                     if(wiki&&WikiFailureClassifier.IsMissing(clone,endpoint,paths.Staging)){Cleanup();return new(false,0,1,[]);}
-                    throw new IOException("MIRROR_CLONE_FAILED");
+                    throw new MirrorBackupException("MIRROR_CLONE_FAILED", GitFailureCode("CLONE", clone.Failure));
                 }
                 await MirrorSafeCopy.SanitizeAsync(paths.Staging,endpoint,token).ConfigureAwait(false);
             }
@@ -155,7 +170,7 @@ internal sealed class RepositoryBackupService(IProcessRunner runner,Action<Promo
                     if(!fetch.Success)
                     {
                         missingWiki=wiki&&WikiFailureClassifier.IsMissing(fetch,endpoint,paths.Staging);
-                        if(!missingWiki)throw new IOException("MIRROR_FETCH_FAILED");
+                        if(!missingWiki)throw new MirrorBackupException("MIRROR_FETCH_FAILED", GitFailureCode("FETCH", fetch.Failure));
                     }
                 }
                 if(!missingWiki)
@@ -184,8 +199,11 @@ internal sealed class RepositoryBackupService(IProcessRunner runner,Action<Promo
             try{Cleanup();}catch(Exception cleanup) when(cleanup is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {context.ConsistencyPending=true;return new(true,0,0,["STAGING_CLEANUP_FAILED"],true);}
             if(!wiki)context.FailedRepositories.Add(repository.LocalName);
-            string code=ex.Message is "LFS_OBJECT_INTEGRITY_UNRESOLVED" or "MIRROR_CLONE_FAILED" or "MIRROR_FETCH_FAILED" or "MIRROR_FSCK_FAILED" or "MIRROR_IDENTITY_INVALID"?ex.Message:"MIRROR_BACKUP_FAILED";
-            return new(!wiki,wiki?1:0,0,[code]);
+            string code=ex is MirrorBackupException mirrorFailure ? mirrorFailure.Code
+                : ex.Message is "LFS_OBJECT_INTEGRITY_UNRESOLVED" or "MIRROR_CLONE_FAILED" or "MIRROR_FETCH_FAILED" or "MIRROR_FSCK_FAILED" or "MIRROR_IDENTITY_INVALID" ? ex.Message : "MIRROR_BACKUP_FAILED";
+            string detail=ex is MirrorBackupException detailed ? detailed.DiagnosticCode
+                : code != "MIRROR_BACKUP_FAILED" ? code : LocalFailureCode(ex);
+            return new(!wiki,wiki?1:0,0,[code,detail]);
         }
         void Cleanup()
         {
@@ -201,18 +219,45 @@ internal sealed class RepositoryBackupService(IProcessRunner runner,Action<Promo
         foreach(string oid in corrupt)MirrorSafeCopy.DeleteFile(LfsObjects.PathFor(staging.Root,oid));
         var fetch=await GitCommands.RunAsync(runner,context,staging,endpoint,["fetch","--all"],staging.Root,true,false,true,token).ConfigureAwait(false);
         bool lfsOk=true;
-        if(fetch.Success)lfsOk=(await GitCommands.RunAsync(runner,context,staging,endpoint,["fsck","--objects"],staging.Root,true,false,false,token).ConfigureAwait(false)).Success;
+        if(fetch.Success&&await GitCommands.HasRefsAsync(runner,context,staging,endpoint,token).ConfigureAwait(false))
+            lfsOk=(await GitCommands.RunAsync(runner,context,staging,endpoint,["fsck","--objects"],staging.Root,true,false,false,token).ConfigureAwait(false)).Success;
         var after=await LfsObjects.ScanAsync(staging.Root,token).ConfigureAwait(false);
         if(!lfsOk||after.Values.Any(valid=>!valid)||corrupt.Any(oid=>!after.TryGetValue(oid,out bool valid)||!valid)||(!fetch.Success&&corrupt.Length!=0))
-            throw new IOException("LFS_OBJECT_INTEGRITY_UNRESOLVED");
+            throw new MirrorBackupException("LFS_OBJECT_INTEGRITY_UNRESOLVED", fetch.Success ? "MIRROR_LOCAL_LFS_INTEGRITY_FAILED" : GitFailureCode("LFS_FETCH", fetch.Failure));
         if(!fetch.Success)
         {
             if(fetch.Failure is not (NetworkFailureKind.Timeout or NetworkFailureKind.ConnectionRefused or NetworkFailureKind.ConnectionReset or NetworkFailureKind.Http5xx))
-                throw new IOException("LFS_OBJECT_INTEGRITY_UNRESOLVED");
+                throw new MirrorBackupException("LFS_OBJECT_INTEGRITY_UNRESOLVED", GitFailureCode("LFS_FETCH", fetch.Failure));
             warnings.Add("LFS_FETCH_NETWORK_FAILED");
         }
         if(corrupt.Length!=0)warnings.Add("LFS_OBJECT_CORRUPTION_REPAIRED");
     }
+
+    private static string GitFailureCode(string phase, NetworkFailureKind failure) => $"MIRROR_GIT_{phase}_{failure switch
+    {
+        NetworkFailureKind.ConnectionReset => "CONNECTION_RESET",
+        NetworkFailureKind.ConnectionRefused => "CONNECTION_REFUSED",
+        NetworkFailureKind.Timeout => "TIMEOUT",
+        NetworkFailureKind.TlsCertificate => "TLS_CERTIFICATE",
+        NetworkFailureKind.ProxyAuthentication => "PROXY_AUTHENTICATION",
+        NetworkFailureKind.Unauthorized => "UNAUTHORIZED",
+        NetworkFailureKind.Forbidden => "FORBIDDEN",
+        NetworkFailureKind.NotFound => "NOT_FOUND",
+        NetworkFailureKind.Http5xx => "HTTP_5XX",
+        NetworkFailureKind.RateLimited => "RATE_LIMITED",
+        _ => "UNCLASSIFIED"
+    }}";
+
+    private static string LocalFailureCode(Exception error) => error switch
+    {
+        AuthBoundaryException => "MIRROR_AUTH_INVALID",
+        UnauthorizedAccessException => "MIRROR_LOCAL_ACCESS_DENIED",
+        InvalidDataException => "MIRROR_LOCAL_DATA_INVALID",
+        ArgumentException => "MIRROR_LOCAL_PATH_INVALID",
+        System.ComponentModel.Win32Exception => "MIRROR_LOCAL_SYSTEM_CALL_FAILED",
+        IOException => "MIRROR_LOCAL_IO_FAILED",
+        _ => "MIRROR_FAILURE_UNCLASSIFIED"
+    };
 }
 
 internal static class LfsObjects
@@ -250,23 +295,82 @@ internal static class LfsObjects
 internal sealed record GitCommandResult(bool Success,NetworkFailureKind Failure,int? ExitCode,string Diagnostic);
 internal static class GitCommands
 {
+    internal static async Task<bool> HasRefsAsync(IProcessRunner runner,BackupRunContext context,StagingRepository staging,string endpoint,CancellationToken token)
+    {
+        var result=await RunAsync(runner,context,staging,endpoint,["-C",staging.Root,"show-ref","--head","--quiet"],staging.Root,false,false,false,token).ConfigureAwait(false);
+        if(result.Success)return true;
+        if(result.ExitCode==1)return false;
+        throw new MirrorBackupException("MIRROR_FSCK_FAILED","MIRROR_FSCK_FAILED");
+    }
     internal static async Task<GitCommandResult> RunAsync(IProcessRunner runner,BackupRunContext context,StagingRepository? staging,string endpoint,IReadOnlyList<string> arguments,string working,bool lfs,bool recovery,bool retry,CancellationToken token,string? output=null)
     {
+        string? lfsHooks=null;
+        PathLease? lfsHooksLease=null;
+        try
+        {
+        if(lfs)
+        {
+            if(staging is null || recovery)throw new ArgumentException("LFS_STAGING_REQUIRED");
+            staging.Revalidate();
+            // LFS fsck installs its own hooks. They must never enter the empty
+            // hook directory used by ordinary Git requests or survive promotion.
+            string candidate=Path.Combine(staging.Root,".lfs-hooks-"+Guid.NewGuid().ToString("N"));
+            AclPolicy.CreateRestrictedDirectory(candidate,WindowsIdentity.GetCurrent().User!,requireNew:true);
+            lfsHooks=candidate;
+            lfsHooksLease=SummaryStore.RequirePrivateDirectory(lfsHooks);
+        }
+        IReadOnlyDictionary<string,string?> primaryEnvironment=context.EnvironmentFor(endpoint,staging,recovery,lfsHooks);
+        IReadOnlyDictionary<string,string?>? fallbackEnvironment=null;
+        bool usingFallback=false;
         for(int attempt=1;;attempt++)
         {
             token.ThrowIfCancellationRequested();staging?.Revalidate();
             ToolDetection tool=(lfs?context.Tools.GitLfs:context.Tools.Git)!;
-            var request=new ProcessRequest(tool.AbsolutePath,arguments,working,context.EnvironmentFor(endpoint,staging,recovery),TimeSpan.FromSeconds(recovery?30:600),
+            var environment=usingFallback?fallbackEnvironment!:primaryEnvironment;
+            var request=new ProcessRequest(tool.AbsolutePath,arguments,working,environment,TimeSpan.FromSeconds(recovery?30:600),
                 output is null?ProcessOutputMode.EphemeralText:ProcessOutputMode.CapturedFile,output,65536,tool.Identity,true);
             using var diagnostic=new GitDiagnostic();
             if(recovery)context.Recovery.ValidateRequest(request,context.Recovery.Job);
             var result=await runner.RunAsync(request,recovery?context.Recovery.Job:context.Job,diagnostic,token).ConfigureAwait(false);
             if(result.Cancelled)throw new OperationCanceledException(token);
             token.ThrowIfCancellationRequested();
-            string text=diagnostic.Text;NetworkFailureKind kind=result.TimedOut?NetworkFailureKind.Timeout:NetworkProbe.Classify(text);
-            if(result.ExitCode==0&&!result.TimedOut)return new(true,NetworkFailureKind.None,result.ExitCode,"");
-            if(!retry||!RetryPolicy.ShouldRetry(kind,attempt))return new(false,kind,result.ExitCode,text);
-            await Task.Delay(TimeSpan.FromMilliseconds(250*attempt),token).ConfigureAwait(false);
+            string text=diagnostic.Text;
+            string transportText=text.Replace("\r\n","\n",StringComparison.Ordinal);
+            // Git itself prefixes clone failures with this exact destination. Do not
+            // search arbitrary remote prose for transport errors or route hints.
+            if(arguments.Count==4 && arguments[0]=="clone" && arguments[1]=="--mirror")
+            {
+                string preamble="Cloning into bare repository '"+arguments[3]+"'...\n";
+                if(transportText.StartsWith(preamble,StringComparison.Ordinal))transportText=transportText[preamble.Length..];
+            }
+            NetworkFailureKind kind=result.TimedOut?NetworkFailureKind.Timeout:NetworkProbe.Classify(transportText);
+            if(result.ExitCode==0&&!result.TimedOut)
+            {
+                if(usingFallback)context.MarkWindowsSystemProxyFallbackSucceeded();
+                return new(true,NetworkFailureKind.None,result.ExitCode,"");
+            }
+            if(!retry)return new(false,kind,result.ExitCode,text);
+            if(RetryPolicy.ShouldRetry(kind,attempt))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250*attempt),token).ConfigureAwait(false);
+                continue;
+            }
+            if(!recovery&&!usingFallback&&(kind is NetworkFailureKind.Timeout or NetworkFailureKind.ConnectionRefused or NetworkFailureKind.ConnectionReset))
+            {
+                fallbackEnvironment=context.WindowsSystemProxyFallbackEnvironmentFor(endpoint,staging,lfsHooks);
+                if(fallbackEnvironment is not null)
+                {
+                    usingFallback=true;attempt=0;
+                    continue;
+                }
+            }
+            return new(false,kind,result.ExitCode,text);
+        }
+        }
+        finally
+        {
+            lfsHooksLease?.Dispose();
+            if(lfsHooks is not null)MirrorSafeCopy.DeleteTree(lfsHooks);
         }
     }
     internal static async Task ValidateIdentityAsync(IProcessRunner runner,BackupRunContext context,StagingRepository staging,string endpoint,bool recovery,CancellationToken token)
@@ -292,9 +396,9 @@ internal static class GitCommands
     private sealed class GitDiagnostic:IProgress<string>,IDisposable
     {
         private readonly StringBuilder text=new();private bool overflow;
-        public void Report(string value){if(overflow)return;if(text.Length+value.Length>8192){text.Clear();overflow=true;}else text.Append(value);}
-        internal string Text=>overflow?"":text.ToString();
-        public void Dispose()=>text.Clear();
+        public void Report(string value){lock(text){if(overflow)return;if(text.Length+value.Length>8192){text.Clear();overflow=true;}else text.Append(value);}}
+        internal string Text{get{lock(text)return overflow?"":text.ToString();}}
+        public void Dispose(){lock(text){text.Clear();overflow=true;}}
     }
 }
 

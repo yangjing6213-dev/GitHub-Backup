@@ -10,6 +10,223 @@ namespace GitHubBackup.App.Tests;
 public sealed class GitRuntimeContextTests
 {
     [TestMethod]
+    public async Task Released_candidate_rejects_stale_requests_and_allows_new_runtime_on_the_same_job()
+    {
+        using var h = new PreflightFixture();
+        var first = await GitRuntimeContext.CreateAsync(h.Tools.Git!,h.Tools.GitHubCli!,h.Runner,h.Job,h.Environment,default);
+        GitRuntimeContext? second = null;
+        try
+        {
+            string directory = Path.GetDirectoryName(first.Environment["GIT_CONFIG_GLOBAL"])!;
+            await first.DisposeCandidateAsync(h.Job);
+            Assert.IsFalse(Directory.Exists(directory));
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+            Assert.ThrowsExactly<ObjectDisposedException>(() => ((RuntimeEnvironment)first.Environment).Owner!.AcquireRequest(h.Job));
+            second = await GitRuntimeContext.CreateAsync(h.Tools.Git!,h.Tools.GitHubCli!,h.Runner,h.Job,h.Environment,default);
+            using (second.AcquireRequest(h.Job)) { }
+            Assert.AreNotEqual(directory,Path.GetDirectoryName(second.Environment["GIT_CONFIG_GLOBAL"]));
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+        }
+        finally
+        {
+            await h.Job.CancelAllAsync(TimeSpan.FromSeconds(5));
+            await first.DisposeAsync();
+            if (second is not null) await second.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
+    [DataRow("session")]
+    [DataRow("request")]
+    [DataRow("job-lease")]
+    [DataRow("different-job")]
+    public async Task Candidate_release_preserves_live_or_mismatched_resources(string boundary)
+    {
+        using var h = new PreflightFixture();
+        using var other = OperationJob.Create();
+        var runtime = await GitRuntimeContext.CreateAsync(h.Tools.Git!,h.Tools.GitHubCli!,h.Runner,h.Job,h.Environment,default);
+        IDisposable? active = null;
+        try
+        {
+            if (boundary == "session") runtime.FreezeSessionInventory(h.Tools);
+            if (boundary == "request") active = runtime.AcquireRequest(h.Job);
+            if (boundary == "job-lease") active = h.Job.CreateRequestJob();
+            var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () =>
+                await runtime.DisposeCandidateAsync(boundary == "different-job" ? other : h.Job));
+            Assert.AreEqual(boundary == "different-job" ? "GIT_RUNTIME_OPERATION_MISMATCH" : "GIT_RUNTIME_OPERATION_STILL_ACTIVE",error.Message);
+            Assert.IsTrue(Directory.Exists(Path.GetDirectoryName(runtime.Environment["GIT_CONFIG_GLOBAL"])));
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+            Assert.IsFalse(other.IsCancellationRequested);
+        }
+        finally
+        {
+            active?.Dispose();
+            await h.Job.CancelAllAsync(TimeSpan.FromSeconds(5));
+            await runtime.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
+    public async Task Public_probe_is_not_an_owned_route_candidate()
+    {
+        using var h = new PreflightFixture();
+        await using var runtime = await GitRuntimeContext.CreatePublicProbeAsync(h.Environment,default);
+        var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () => await runtime.DisposeCandidateAsync(h.Job));
+        Assert.AreEqual("GIT_RUNTIME_OPERATION_MISMATCH",error.Message);
+        Assert.IsTrue(Directory.Exists(Path.GetDirectoryName(runtime.Environment["GIT_CONFIG_GLOBAL"])));
+        Assert.IsFalse(h.Job.IsCancellationRequested);
+    }
+
+    [TestMethod]
+    public async Task Installed_git_and_gh_create_helper_with_isolated_empty_config_and_system_only_parent_path()
+    {
+        using var tools = await TestToolBuilder.CreateAsync();
+        string realGit = @"C:\Program Files\Git\cmd\git.exe";
+        string realGh = @"C:\Program Files\GitHub CLI\gh.exe";
+        var git = new ToolDetection(realGit, ExecutableTrust.CaptureTrustedIdentity(realGit), "installed", true);
+        var gh = new ToolDetection(realGh, ExecutableTrust.CaptureTrustedIdentity(realGh), "installed", true);
+        string ghConfig = Path.Combine(tools.Root, "empty-gh-config");
+        AclPolicy.CreateRestrictedDirectory(ghConfig, WindowsIdentity.GetCurrent().User!);
+        var environment = ChildEnvironmentBuilder.Build(ChildEnvironmentBuilder.CreateBase(new Dictionary<string,string?>
+        {
+            ["SystemRoot"] = Environment.GetEnvironmentVariable("SystemRoot"),
+            ["TEMP"] = tools.Root, ["TMP"] = tools.Root, ["USERPROFILE"] = tools.Root,
+            ["APPDATA"] = tools.Root, ["LOCALAPPDATA"] = tools.Root
+        }, []), new Dictionary<string,string?> { ["GH_CONFIG_DIR"] = ghConfig });
+        var runner = new EmptyConfigSetupRunner(realGh);
+        using var job = OperationJob.Create();
+        GitRuntimeContext? context = null;
+        try
+        {
+            context = await GitRuntimeContext.CreateAsync(git, gh, runner, job, environment, default);
+            Assert.IsTrue(runner.SetupSucceeded, "The real gh process must invoke installed Git successfully.");
+            CollectionAssert.AreEqual(new[] { Path.GetDirectoryName(realGit)!, Path.Combine(Environment.GetEnvironmentVariable("SystemRoot")!, "System32") }, context.Environment["PATH"]!.Split(Path.PathSeparator));
+            Assert.AreEqual(ghConfig, context.Environment["GH_CONFIG_DIR"]);
+            Assert.AreEqual(tools.Root, context.Environment["USERPROFILE"]);
+            Assert.IsFalse(context.Environment.ContainsKey("GH_TOKEN"));
+            Assert.Contains("auth git-credential", File.ReadAllText(context.Environment["GIT_CONFIG_GLOBAL"]!));
+            Assert.HasCount(0, Directory.GetFileSystemEntries(ghConfig));
+        }
+        finally
+        {
+            await job.CancelAllAsync(TimeSpan.FromSeconds(5));
+            if (context is not null) await context.DisposeAsync();
+        }
+    }
+
+    // --force only lets this test initialize a helper with no configured account.
+    // Production receives the unchanged, non-force request and never reads test credentials.
+    private sealed class EmptyConfigSetupRunner(string gh) : IProcessRunner
+    {
+        private readonly ProcessRunner native = new();
+        internal bool SetupSucceeded { get; private set; }
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, OperationJob job, IProgress<string>? progress, CancellationToken token)
+        {
+            if (request.FilePath != gh) return await native.RunAsync(request, job, progress, token);
+            CollectionAssert.AreEqual(new[] { "auth", "setup-git", "--hostname", "github.com" }, request.Arguments.ToArray());
+            var result = await native.RunAsync(request with { Arguments = request.Arguments.Append("--force").ToArray() }, job, progress, token);
+            SetupSucceeded = ProcessOutcomeClassifier.Classify(result) == ProcessTerminalKind.Succeeded;
+            return result;
+        }
+    }
+
+    [TestMethod]
+    public async Task Changed_git_identity_is_rejected_before_gh_can_launch_nested_git()
+    {
+        using var tools = await TestToolBuilder.CreateAsync();
+        string gitPath = Path.Combine(tools.Root, "git.exe");
+        var identity = ExecutableTrust.CaptureTrustedIdentity(gitPath);
+        var git = new ToolDetection(gitPath, identity with { FileIndex = identity.FileIndex + 1 }, "fixture", true);
+        var gh = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        var runner = new ScriptedProcessRunner(); using var job = OperationJob.Create();
+        var error = await Assert.ThrowsExactlyAsync<IOException>(() => GitRuntimeContext.CreateAsync(git, gh, runner, job, tools.Environment, default));
+        Assert.AreEqual("PROCESS_EXECUTABLE_IDENTITY_CHANGED", error.Message);
+        Assert.HasCount(0, runner.Requests);
+        Assert.HasCount(0, Directory.GetDirectories(tools.Root, "GitHubBackup-git-*"));
+        AssertParentLeaseReleased(tools.Root);
+    }
+
+    [TestMethod]
+    public async Task Validated_git_cannot_be_replaced_while_gh_resolves_it_through_path()
+    {
+        using var tools = await TestToolBuilder.CreateAsync();
+        string gitPath = Path.Combine(tools.Root, "git.exe");
+        var git = new ToolDetection(gitPath, ExecutableTrust.CaptureTrustedIdentity(gitPath), "fixture", true);
+        var gh = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        var runner = new GitPinProbeRunner(gitPath); using var job = OperationJob.Create();
+        var error = await Assert.ThrowsExactlyAsync<IOException>(() => GitRuntimeContext.CreateAsync(git, gh, runner, job, tools.Environment, default));
+        Assert.AreEqual("GIT_RUNTIME_COMMAND_FAILED", error.Message);
+        Assert.IsTrue(runner.AttemptedReplacement);
+        using var after = new FileStream(gitPath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+    }
+
+    private sealed class GitPinProbeRunner(string git) : IProcessRunner
+    {
+        internal bool AttemptedReplacement { get; private set; }
+        public Task<ProcessResult> RunAsync(ProcessRequest request, OperationJob job, IProgress<string>? progress, CancellationToken token)
+        {
+            Assert.AreEqual(Path.GetDirectoryName(git), request.Environment["PATH"]!.Split(Path.PathSeparator)[0]);
+            AttemptedReplacement = true;
+            Assert.ThrowsExactly<IOException>(() => { using var ignored = new FileStream(git, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite); });
+            Assert.ThrowsExactly<IOException>(() => File.Move(git, git + ".replaced"));
+            return Task.FromResult(new ProcessResult(1, false, false, [], []));
+        }
+    }
+
+    [TestMethod]
+    [DataRow("wrong-name")]
+    [DataRow("path-separator")]
+    public async Task Ambiguous_git_lookup_path_is_rejected_before_starting_a_process(string mutation)
+    {
+        using var tools = await TestToolBuilder.CreateAsync();
+        string gitPath = tools.Executable;
+        if (mutation == "path-separator")
+        {
+            string directory = Path.Combine(tools.Root, "git;injected");
+            AclPolicy.CreateRestrictedDirectory(directory, WindowsIdentity.GetCurrent().User!);
+            gitPath = Path.Combine(directory, "git.exe");
+            File.Copy(tools.Executable, gitPath);
+        }
+        var git = new ToolDetection(gitPath, ExecutableTrust.CaptureTrustedIdentity(gitPath), "fixture", true);
+        var runner = new ScriptedProcessRunner(); using var job = OperationJob.Create();
+        var error = await Assert.ThrowsExactlyAsync<InvalidDataException>(() => GitRuntimeContext.CreateAsync(git, git, runner, job, tools.Environment, default));
+        Assert.AreEqual("GIT_RUNTIME_GIT_PATH_INVALID", error.Message);
+        Assert.HasCount(0, runner.Requests);
+        Assert.HasCount(0, Directory.GetDirectories(tools.Root, "GitHubBackup-git-*"));
+    }
+
+    [TestMethod]
+    public async Task Adding_git_directory_preserves_live_authentication_binding()
+    {
+        using var fixture = new PreflightFixture();
+        using var tools = await TestToolBuilder.CreateAsync();
+        using var authentication = fixture.Auth.AcquireConfig();
+        var inherited = authentication.CreateEnvironment(tools.Environment);
+        string realGit = @"C:\Program Files\Git\cmd\git.exe";
+        var git = new ToolDetection(realGit, ExecutableTrust.CaptureTrustedIdentity(realGit), "installed", true);
+        var gh = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        using var job = OperationJob.Create();
+        var context = await GitRuntimeContext.CreateAsync(git, gh, new SetupGitRunner(gh.AbsolutePath), job, inherited, default);
+        try
+        {
+            var environment = (RuntimeEnvironment)context.Environment;
+            Assert.AreSame(context, environment.Owner);
+            Assert.AreSame(authentication, environment.Authentication);
+            Assert.AreEqual("fixture-user", environment.AuthenticatedLogin);
+            Assert.AreEqual(fixture.Paths.AppGhConfigDirectory, environment["GH_CONFIG_DIR"]);
+            Assert.AreEqual(Path.Combine(Environment.GetEnvironmentVariable("SystemRoot")!, "System32"), inherited["PATH"]);
+            File.WriteAllText(fixture.Hosts, PreflightFixture.Metadata.Replace("fixture-user", "changed-user", StringComparison.Ordinal));
+            var error = Assert.ThrowsExactly<AuthBoundaryException>(() => environment.RevalidateAuthentication());
+            Assert.AreEqual("AUTH_LOGIN_MISMATCH", error.Code);
+        }
+        finally
+        {
+            await job.CancelAllAsync(TimeSpan.FromSeconds(5));
+            await context.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
     [DataRow(false, "telemetry")] [DataRow(true, "telemetry")]
     [DataRow(false, "notifier")] [DataRow(true, "notifier")]
     [DataRow(false, "unknown")] [DataRow(true, "unknown")]
@@ -20,7 +237,8 @@ public sealed class GitRuntimeContextTests
         if (mutation == "unknown") environment["UNAPPROVED_KEY"] = "fixture";
         else environment.Remove(mutation == "telemetry" ? "GH_TELEMETRY" : "GH_NO_UPDATE_NOTIFIER");
         using var job = OperationJob.Create(); var runner = new ScriptedProcessRunner();
-        var tool = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        string git = Path.Combine(tools.Root, "git.exe");
+        var tool = new ToolDetection(git, ExecutableTrust.CaptureTrustedIdentity(git), "fixture", true);
         await Assert.ThrowsExactlyAsync<ArgumentException>(() => authenticated
             ? GitRuntimeContext.CreateAsync(tool, tool, runner, job, environment, default)
             : GitRuntimeContext.CreatePublicProbeAsync(environment, default));
@@ -45,7 +263,8 @@ public sealed class GitRuntimeContextTests
     {
         using var tools = await TestToolBuilder.CreateAsync();
         using var job = OperationJob.Create(); var runner = new ScriptedProcessRunner();
-        var tool = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        string git = Path.Combine(tools.Root, "git.exe");
+        var tool = new ToolDetection(git, ExecutableTrust.CaptureTrustedIdentity(git), "fixture", true);
         string? createdDirectory = null; bool reachedFailure = false;
         void AfterCreated(string path)
         {
@@ -72,7 +291,8 @@ public sealed class GitRuntimeContextTests
     {
         using var tools = await TestToolBuilder.CreateAsync();
         using var job = OperationJob.Create(); var runner = new ScriptedProcessRunner();
-        var tool = new ToolDetection(tools.Executable, ExecutableTrust.CaptureTrustedIdentity(tools.Executable), "fixture", true);
+        string git = Path.Combine(tools.Root, "git.exe");
+        var tool = new ToolDetection(git, ExecutableTrust.CaptureTrustedIdentity(git), "fixture", true);
         string? createdDirectory = null;
         void DenyConfigCreation(string path)
         {

@@ -59,10 +59,26 @@ internal static class NativeFileSystem
     internal static NativeFileIdentity InspectExecutable(SafeFileHandle handle, string expectedPath) =>
         InspectCore(handle, expectedPath, directory: false, rejectHardLinks: false);
 
-    private static NativeFileIdentity InspectCore(SafeFileHandle handle, string expectedPath, bool? directory, bool rejectHardLinks)
+    // Only setup shortcut ancestors may be Microsoft cloud placeholders. This
+    // does not authorize cloud files, installation payloads or backup paths.
+    internal static NativeFileIdentity InspectSetupShortcutParent(SafeFileHandle handle, string expectedPath) =>
+        InspectCore(handle, expectedPath, directory: true, rejectHardLinks: true, allowCloudShortcutParent: true);
+
+    internal static bool IsSetupShortcutCloudTag(uint tag) => (tag & 0xffff0fff) == 0x9000001a;
+
+    private static NativeFileIdentity InspectCore(SafeFileHandle handle, string expectedPath, bool? directory, bool rejectHardLinks,
+        bool allowCloudShortcutParent = false)
     {
         if (!GetFileInformationByHandle(handle, out FileInformation info)) ThrowLastError();
-        if ((info.Attributes & FileAttributes.ReparsePoint) != 0) throw new PathBoundaryException("REPARSE_POINT_REJECTED");
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            if (!allowCloudShortcutParent) throw new PathBoundaryException("REPARSE_POINT_REJECTED");
+            if (!GetFileInformationByHandleEx(handle, 9, out FileAttributeTagInformation tag, 8)) ThrowLastError();
+            if ((tag.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint))
+                    != (FileAttributes.Directory | FileAttributes.ReparsePoint)
+                || !IsSetupShortcutCloudTag(tag.ReparseTag))
+                throw new PathBoundaryException("REPARSE_POINT_REJECTED");
+        }
         if (directory is not null && ((info.Attributes & FileAttributes.Directory) != 0) != directory)
             throw new PathBoundaryException("TYPE_MISMATCH");
         if (rejectHardLinks && (info.Attributes & FileAttributes.Directory) == 0 && info.NumberOfLinks != 1)
@@ -186,6 +202,13 @@ internal static class NativeFileSystem
         internal uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInformation
+    {
+        internal FileAttributes Attributes;
+        internal uint ReparseTag;
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -196,6 +219,10 @@ internal static class NativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation information);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass,
+        out FileAttributeTagInformation information, uint size);
     [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint capacity, uint flags);
     [DllImport("advapi32.dll", SetLastError = true)]

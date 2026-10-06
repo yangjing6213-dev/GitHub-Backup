@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -13,8 +13,13 @@
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
     <AssemblyName>GitHubBackup</AssemblyName>
+    <ApplicationIcon>Assets\enhe-app-icon.ico</ApplicationIcon>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode>true</RestoreLockedMode>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\author-avatar.png" />
+  </ItemGroup>
 
 </Project>

@@ -100,6 +100,24 @@ internal sealed class ProxyScope(NetworkProbe probe, IReadOnlyDictionary<string,
         IReadOnlyDictionary<string,string?> owned = environment is RuntimeEnvironment runtime ? new RuntimeEnvironment(clean, runtime.Owner, runtime.Authentication, runtime.AuthenticatedLogin) : clean;
         return ChildEnvironmentBuilder.Build(owned, profile.Environment);
     }
+    internal (ProxyProfile? Profile,string? ErrorCode) GetSystemProxyAlternative(ProxyProfile current)
+    {
+        var origins = new[] { new Uri("https://github.com"), new Uri("https://api.github.com") };
+        Uri?[] resolved;
+        try { resolved = origins.Select(resolver).ToArray(); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.Net.WebException or SocketException or PlatformNotSupportedException)
+        { return (null,"PROXY_SYSTEM_INVALID"); }
+        if (resolved.All(uri => uri is null) || resolved.Select((uri,i) => uri == origins[i]).All(isDirect => isDirect)) return (null,null);
+        if (resolved.Any(uri => uri is null) || resolved.Select((uri,i) => uri == origins[i]).Any(isDirect => isDirect))
+            return (null,"PROXY_SYSTEM_INCONSISTENT");
+        var parsed = resolved.Select(uri => Parse(uri!.OriginalString)).ToArray();
+        if (parsed.Any(profile => !profile.IsValid)) return (null,"PROXY_SYSTEM_INVALID");
+        if (parsed[0].Uri != parsed[1].Uri) return (null,"PROXY_SYSTEM_INCONSISTENT");
+        var system = CreateSystemProxy(parsed[0].Uri!, parent);
+        if (current.Environment.Count == system.Environment.Count
+            && current.Environment.All(pair => system.Environment.TryGetValue(pair.Key,out var value) && value == pair.Value)) return (null,null);
+        return (system,null);
+    }
     internal async Task<(ProxyProfile Profile, NetworkCheckResult Check)> SelectAsync(Func<ProxyProfile,CancellationToken,Task<NetworkCheckResult>> check, CancellationToken token)
     {
         ProxyProfile initial;
@@ -110,18 +128,10 @@ internal sealed class ProxyScope(NetworkProbe probe, IReadOnlyDictionary<string,
         NetworkCheckResult result = await check(initial, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         if (result.Success || !IsConnectionFailure(result.FailureKind)) return (initial, result);
-        var origins = new[] { new Uri("https://github.com"), new Uri("https://api.github.com") };
-        var resolved = origins.Select(resolver).ToArray();
+        var alternative = GetSystemProxyAlternative(initial);
         token.ThrowIfCancellationRequested();
-        if (resolved.All((uri) => uri is null) || resolved.Select((uri,i) => uri == origins[i]).All(x => x)) return (initial, result);
-        if (resolved.Any(uri => uri is null) || resolved.Select((uri,i) => uri == origins[i]).Any(x => x))
-            return (initial, new(false, NetworkFailureKind.Unknown, null, "PROXY_SYSTEM_INCONSISTENT"));
-        var parsed = resolved.Select(uri => Parse(uri!.OriginalString)).ToArray();
-        if (parsed.Any(p => !p.IsValid)) return (initial, new(false, NetworkFailureKind.Unknown, null, "PROXY_SYSTEM_INVALID"));
-        if (parsed[0].Uri != parsed[1].Uri) return (initial, new(false, NetworkFailureKind.Unknown, null, "PROXY_SYSTEM_INCONSISTENT"));
-        var system = CreateSystemProxy(parsed[0].Uri!, parent);
-        if (initial.Environment.Count == system.Environment.Count && initial.Environment.All(p => system.Environment.TryGetValue(p.Key, out var value) && value == p.Value)) return (initial, result);
-        return (system, await check(system, token).ConfigureAwait(false));
+        if (alternative.ErrorCode is not null) return (initial, new(false,NetworkFailureKind.Unknown,null,alternative.ErrorCode));
+        return alternative.Profile is null ? (initial,result) : (alternative.Profile,await check(alternative.Profile,token).ConfigureAwait(false));
     }
     private static bool IsConnectionFailure(NetworkFailureKind kind) => kind is NetworkFailureKind.Timeout or NetworkFailureKind.ConnectionRefused or NetworkFailureKind.ConnectionReset;
     internal async Task<ProxyProfile> SelectForLoginAsync(ToolInventory tools, GitRuntimeContext publicProbeContext, OperationJob job, CancellationToken cancellationToken)

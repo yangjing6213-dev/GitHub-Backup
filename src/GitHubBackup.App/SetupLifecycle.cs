@@ -405,7 +405,7 @@ internal static class SetupLifecycle
                     SafeFileHandle? folder = null;
                     foreach (string segment in NativeFileSystem.Segments(directory))
                     {
-                        folder = NativeFileSystem.Open(segment); parents.Add(folder); NativeFileSystem.Inspect(folder, segment, true);
+                        folder = NativeFileSystem.Open(segment); parents.Add(folder); NativeFileSystem.InspectSetupShortcutParent(folder, segment);
                     }
                     SetupNative.VerifySharedParent(folder ?? throw new IOException("SETUP_SHORTCUT_PARENT_MISSING"), context.User);
                 }

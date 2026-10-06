@@ -95,7 +95,9 @@ internal static class MirrorSafeCopy
         if(parts.Length!=2||!AuthConfigLease.IsLogin(parts[0])||
             !(ValidName(parts[1])||(parts[1].EndsWith(".wiki",StringComparison.Ordinal)&&ValidName(parts[1][..^5]))))
             throw new InvalidDataException("MIRROR_ENDPOINT_INVALID");
-        return "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = true\n[remote \"origin\"]\n\turl = "+endpoint+"\n\tfetch = +refs/*:refs/*\n\tmirror = true\n[lfs]\n\turl = "+endpoint+"/info/lfs\n";
+        // Git LFS otherwise writes this default during fetch, invalidating the
+        // exact config pinned by StagingRepository before the next command.
+        return "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = true\n[remote \"origin\"]\n\turl = "+endpoint+"\n\tfetch = +refs/*:refs/*\n\tmirror = true\n[lfs]\n\turl = "+endpoint+"/info/lfs\n\trepositoryformatversion = 0\n";
         bool ValidName(string name)=>RepositoryEndpointPolicy.ValidateAndCreate(parts[0],parts[0],name,parts[0]+"/"+name,"https://github.com/"+parts[0]+"/"+name).Allowed;
     }
 

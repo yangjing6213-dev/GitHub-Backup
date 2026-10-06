@@ -63,6 +63,39 @@ public sealed class SetupHostHarnessTests
         })
             compile.ArgumentList.Add(arg);
         await RunProcess(compile);
+        if (expectedHostCode == 0)
+        {
+            var silent = NewProcess(outputExe, fixtureParent, runtimeTemp);
+            silent.ArgumentList.Add("/S");
+            await RunProcess(silent);
+            string silentOutput = File.ReadAllText(resultPath);
+            Dictionary<string, string> silentFacts = silentOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Split('=', 2)).ToDictionary(parts => parts[0], parts => parts[1]);
+            Assert.AreEqual("0", silentFacts["argumentCode"], "STANDARD_SILENT_SWITCH_MUST_NOT_CHANGE_THE_FIXED_INSTALL_ROOT");
+
+            string fixedRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "GitHubBackupTool");
+            var silentUninstall = NewProcess(outputExe, fixtureParent, runtimeTemp);
+            silentUninstall.ArgumentList.Add("/S");
+            silentUninstall.ArgumentList.Add("_?=" + fixedRoot);
+            await RunProcess(silentUninstall);
+            string uninstallOutput = File.ReadAllText(resultPath);
+            Dictionary<string, string> uninstallFacts = uninstallOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Split('=', 2)).ToDictionary(parts => parts[0], parts => parts[1]);
+            Assert.AreEqual("0", uninstallFacts["uninstallArgumentCode"],
+                "STANDARD_SILENT_UNINSTALL_MUST_REQUIRE_THE_EXACT_FIXED_ROOT");
+
+            var wrongSilentUninstall = NewProcess(outputExe, fixtureParent, runtimeTemp);
+            wrongSilentUninstall.ArgumentList.Add("/S");
+            wrongSilentUninstall.ArgumentList.Add("_?=" + rejectedTarget);
+            await RunProcess(wrongSilentUninstall);
+            string wrongUninstallOutput = File.ReadAllText(resultPath);
+            Dictionary<string, string> wrongUninstallFacts = wrongUninstallOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Split('=', 2)).ToDictionary(parts => parts[0], parts => parts[1]);
+            Assert.AreEqual("11", wrongUninstallFacts["uninstallArgumentCode"],
+                "SILENT_UNINSTALL_MUST_REJECT_A_CALLER_SELECTED_ROOT");
+            Assert.IsFalse(Directory.Exists(rejectedTarget), "UNINSTALL_ARGUMENT_HARNESS_MUST_NEVER_CREATE_A_TARGET");
+        }
         var run = NewProcess(outputExe, fixtureParent, runtimeTemp);
         run.ArgumentList.Add("/S");
         run.ArgumentList.Add("/D=" + rejectedTarget);

@@ -148,10 +148,13 @@ internal sealed class GitRuntimeContext : IAsyncDisposable
     internal static async Task<GitRuntimeContext> CreateAsync(ToolDetection git, ToolDetection gh, IProcessRunner runner, OperationJob job, IReadOnlyDictionary<string,string?> baseEnvironment, CancellationToken cancellationToken, Action<string>? resourceCreated)
     {
         if (!git.IsSupported || !gh.IsSupported) throw new InvalidOperationException("GIT_RUNTIME_UNSUPPORTED_TOOL");
-        var context = new GitRuntimeContext(baseEnvironment, job, resourceCreated);
+        var context = new GitRuntimeContext(WithGitDirectory(baseEnvironment, git), job, resourceCreated);
         try
         {
-            await context.RunAsync(gh, ["auth", "setup-git", "--hostname", "github.com"], runner, job, cancellationToken).ConfigureAwait(false);
+            // gh resolves its nested Git command through PATH. Pin the selected
+            // executable and its trusted directory until that entire request exits.
+            using (ExecutableTrust.Acquire(git.AbsolutePath, git.Identity))
+                await context.RunAsync(gh, ["auth", "setup-git", "--hostname", "github.com"], runner, job, cancellationToken).ConfigureAwait(false);
             string contents = await context.QueryAsync(git, runner, job, cancellationToken).ConfigureAwait(false);
             ValidateHelpers(contents, gh.AbsolutePath);
             string helper = Helper(gh.AbsolutePath);
@@ -175,6 +178,21 @@ internal sealed class GitRuntimeContext : IAsyncDisposable
             { throw new GitRuntimeCleanupException(context); }
             throw;
         }
+    }
+    private static IReadOnlyDictionary<string,string?> WithGitDirectory(IReadOnlyDictionary<string,string?> environment, ToolDetection git)
+    {
+        string directory = Path.GetDirectoryName(NativeFileSystem.CanonicalPath(git.AbsolutePath))!;
+        if (!string.Equals(Path.GetFileName(git.AbsolutePath), "git.exe", StringComparison.OrdinalIgnoreCase)
+            || directory.Contains(Path.PathSeparator) || directory.Any(char.IsControl))
+            throw new InvalidDataException("GIT_RUNTIME_GIT_PATH_INVALID");
+        var values = new Dictionary<string,string?>(environment, StringComparer.OrdinalIgnoreCase)
+        {
+            // Rebuild from the selected tool, never the process/user PATH.
+            ["PATH"] = ChildEnvironmentBuilder.CreateBase(environment, [directory])["PATH"]
+        };
+        return environment is RuntimeEnvironment runtime
+            ? new RuntimeEnvironment(values, runtime.Owner, runtime.Authentication, runtime.AuthenticatedLogin, runtime.Staging, runtime.Recovery)
+            : values;
     }
     private async Task RunAsync(ToolDetection tool, string[] arguments, IProcessRunner runner, OperationJob job, CancellationToken token)
     {
@@ -263,6 +281,23 @@ internal sealed class GitRuntimeContext : IAsyncDisposable
             if (disposed) return ValueTask.CompletedTask;
             if (activeRequests != 0 || recoveries.Count!=0 || (operation is not null && (!operation.IsCancellationRequested || operation.ActiveLeaseCount != 0))) throw new InvalidOperationException("GIT_RUNTIME_OPERATION_STILL_ACTIVE");
             DeleteOwned(); disposed = true; return ValueTask.CompletedTask;
+        }
+    }
+    internal ValueTask DisposeCandidateAsync(OperationJob job)
+    {
+        // A rejected route is not a session. Close it without cancelling the job
+        // needed by the next route, using the request path's runtime -> job order.
+        lock (gate)
+        {
+            if (operation is null || !ReferenceEquals(operation,job))
+                throw new InvalidOperationException("GIT_RUNTIME_OPERATION_MISMATCH");
+            lock (job.Gate)
+            {
+                if (disposed) return ValueTask.CompletedTask;
+                if (sessionTools is not null || activeRequests != 0 || recoveries.Count != 0 || job.ActiveLeaseCount != 0)
+                    throw new InvalidOperationException("GIT_RUNTIME_OPERATION_STILL_ACTIVE");
+                DeleteOwned(); disposed = true; return ValueTask.CompletedTask;
+            }
         }
     }
     internal void RegisterRecovery(RecoveryLease recovery,OperationJob normal)

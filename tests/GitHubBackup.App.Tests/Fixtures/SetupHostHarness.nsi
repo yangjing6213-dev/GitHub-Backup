@@ -84,6 +84,10 @@ Section
     StrCpy $INSTDIR $SetupFixedRoot
     Call ValidateDirectoryArguments
     FileWrite $HarnessResult "argumentCode=$SetupCode$\r$\n"
+    StrCpy $SetupMode "uninstall"
+    StrCpy $INSTDIR $SetupFixedRoot
+    Call ValidateDirectoryArguments
+    FileWrite $HarnessResult "uninstallArgumentCode=$SetupCode$\r$\n"
 harness_done:
     FileClose $HarnessResult
     SetErrorLevel 0

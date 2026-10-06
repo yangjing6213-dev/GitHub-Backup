@@ -187,9 +187,9 @@ public sealed class DesktopSetupTests
     }
 
     [TestMethod]
-    public void Repair_allowlist_is_closed_ordinal_and_accepts_all_23_authorized_codes()
+    public void Repair_allowlist_is_closed_ordinal_and_accepts_all_24_authorized_codes()
     {
-        string[] codes = ["PREFLIGHT_PRIVATE_ROOT_ACL_UNSAFE", "PREFLIGHT_PRIVATE_OWNER_UNSAFE", "PREFLIGHT_PRIVATE_NULL_DACL_UNSAFE",
+        string[] codes = ["PREFLIGHT_PRIVATE_ROOT_ACL_UNSAFE", "PREFLIGHT_PRIVATE_OWNER_UNSAFE", "PREFLIGHT_PRIVATE_NULL_DACL_UNSAFE", "PREFLIGHT_PRIVATE_READ_ACL_UNSAFE",
             "LOCK_PATH_OWNER_UNSAFE", "LOCK_PATH_NULL_DACL_UNSAFE", "LOCK_PATH_READ_ACL_UNSAFE", "LOCK_PATH_WRITE_ACL_UNSAFE",
             "MIRROR_SOURCE_OWNER_UNSAFE", "MIRROR_SOURCE_NULL_DACL_UNSAFE", "MIRROR_SOURCE_READ_ACL_UNSAFE", "MIRROR_SOURCE_WRITE_ACL_UNSAFE",
             "METADATA_SOURCE_OWNER_UNSAFE", "METADATA_SOURCE_NULL_DACL_UNSAFE", "METADATA_SOURCE_READ_ACL_UNSAFE", "METADATA_SOURCE_WRITE_ACL_UNSAFE",
@@ -201,7 +201,7 @@ public sealed class DesktopSetupTests
             foreach (string rejected in new[] { code.ToLowerInvariant(), code + "_EXTRA", " " + code, code + " ", code[..^1] })
                 Assert.IsFalse(RepairPolicy.IsRepairable(rejected), rejected);
         }
-        foreach (string rejected in new[] { "", "PREFLIGHT_PRIVATE_READ_ACL_UNSAFE", "MANIFEST_REPARSE_UNSAFE", "UNKNOWN_OWNER_UNSAFE" })
+        foreach (string rejected in new[] { "", "MANIFEST_REPARSE_UNSAFE", "UNKNOWN_OWNER_UNSAFE" })
             Assert.IsFalse(RepairPolicy.IsRepairable(rejected), rejected);
     }
 
@@ -271,7 +271,7 @@ public sealed class DesktopSetupTests
         StorageTestRoot.Grant(selected, System.Security.AccessControl.FileSystemRights.Read);
         StorageTestRoot.Grant(other, System.Security.AccessControl.FileSystemRights.Read);
         StorageTestRoot.Grant(child, System.Security.AccessControl.FileSystemRights.Read);
-        var entries = new[] { new SensitivePathAssessment(selected, AclRisk.Block, "PREFLIGHT_PRIVATE_ROOT_ACL_UNSAFE"), new SensitivePathAssessment(other, AclRisk.Block, "MANIFEST_READ_ACL_UNSAFE") };
+        var entries = new[] { new SensitivePathAssessment(selected, AclRisk.Block, "PREFLIGHT_PRIVATE_READ_ACL_UNSAFE"), new SensitivePathAssessment(other, AclRisk.Block, "MANIFEST_READ_ACL_UNSAFE") };
         int checks = 0; var actions = new DesktopWorkflow(AppPaths.Create(root.Path), new ScriptedProcessRunner(),
             check: (_, _, _, _) => { checks++; return Task.FromResult(Snapshot(entries)); }).Actions;
         var settings = new AppSettings("owner", root.Path, NetworkMode.Auto); var shown = await actions.Check(BackupMode.Daily, settings, default);

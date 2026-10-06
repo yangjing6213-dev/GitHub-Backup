@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 namespace GitHubBackup.App;
@@ -9,6 +10,9 @@ namespace GitHubBackup.App;
 // only the packaged manifest; Windows determines every installation destination.
 internal static class SetupCommand
 {
+    private static readonly Guid DesktopFolderId = new("B4BFCC3A-DB2C-424C-B029-7FE99A87C641");
+    private const int KnownFolderFileNotFound = unchecked((int)0x80070002);
+
     internal sealed record Arguments(bool Install, string? ManifestPath, string? ExpectedHash);
 
     internal static bool IsSetupRequest(string[] args)
@@ -31,6 +35,22 @@ internal static class SetupCommand
         if (!string.Equals(path, args[1], StringComparison.OrdinalIgnoreCase) || Path.GetFileName(path).Length == 0)
             throw new ArgumentException("SETUP_MANIFEST_PATH_INVALID");
         return new(true, path, args[2].ToUpperInvariant());
+    }
+
+    internal static string ResolveDefaultDesktopPath(string userProfile, string registeredDesktop)
+    {
+        try
+        {
+            string expected = NativeFileSystem.CanonicalPath(Path.Combine(userProfile, "Desktop"));
+            string configured = NativeFileSystem.CanonicalPath(registeredDesktop);
+            if (!string.Equals(configured, expected, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("SETUP_DESKTOP_FALLBACK_UNSAFE");
+            return expected;
+        }
+        catch (ArgumentException ex)
+        {
+            throw new IOException("SETUP_DESKTOP_FALLBACK_UNSAFE", ex);
+        }
     }
 
     internal static int Execute(string[] args)
@@ -111,11 +131,34 @@ internal static class SetupCommand
         IntPtr path = IntPtr.Zero;
         try
         {
-            Marshal.ThrowExceptionForHR(SHGetKnownFolderPath(ref id, 0, IntPtr.Zero, out path));
+            int result = SHGetKnownFolderPath(ref id, 0, IntPtr.Zero, out path);
+            if (result == KnownFolderFileNotFound && id == DesktopFolderId)
+                return ResolveMissingDefaultDesktop();
+            Marshal.ThrowExceptionForHR(result);
             return NativeFileSystem.CanonicalPath(Marshal.PtrToStringUni(path)
                 ?? throw new IOException("SETUP_KNOWN_FOLDER_MISSING"));
         }
         finally { if (path != IntPtr.Zero) Marshal.FreeCoTaskMem(path); }
+    }
+
+    private static string ResolveMissingDefaultDesktop()
+    {
+        string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        using RegistryKey shellFolders = Registry.CurrentUser.OpenSubKey(
+            @"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders", writable: false)
+            ?? throw new IOException("SETUP_DESKTOP_REGISTRATION_MISSING");
+        string registered = shellFolders.GetValue("Desktop", null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string
+            ?? throw new IOException("SETUP_DESKTOP_REGISTRATION_MISSING");
+        string desktop = ResolveDefaultDesktopPath(profile, Environment.ExpandEnvironmentVariables(registered));
+
+        if (!Directory.Exists(desktop))
+        {
+            using var profileParents = NativeFileSystem.PinDirectories(profile);
+            Directory.CreateDirectory(desktop);
+        }
+        using var handle = NativeFileSystem.Open(desktop);
+        NativeFileSystem.Inspect(handle, desktop, directory: true);
+        return desktop;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

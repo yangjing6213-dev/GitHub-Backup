@@ -26,6 +26,17 @@ public sealed class SetupCommandTests
     }
 
     [TestMethod]
+    public void Missing_desktop_fallback_is_limited_to_the_registered_default_user_desktop()
+    {
+        Assert.AreEqual(@"C:\Users\Example\Desktop",
+            SetupCommand.ResolveDefaultDesktopPath(@"C:\Users\Example", @"C:\Users\Example\Desktop"));
+        Assert.Throws<IOException>(() => SetupCommand.ResolveDefaultDesktopPath(
+            @"C:\Users\Example", @"D:\Shared\Desktop"));
+        Assert.Throws<IOException>(() => SetupCommand.ResolveDefaultDesktopPath(
+            @"C:\Users\Example", @"\\server\share\Desktop"));
+    }
+
+    [TestMethod]
     [DataRow("--setup")]
     [DataRow("--setup-upgrade")]
     [DataRow("--SETUP-INSTALL")]

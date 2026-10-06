@@ -20,6 +20,114 @@ public sealed class MainFormInteractionTests
     });
 
     [TestMethod]
+    public void Main_window_has_chinese_default_pages_and_switchable_english_about_content() => UiTest.Run(async () =>
+    {
+        using var form = new MainForm(new UiFixture().Actions);
+        await form.LoadSettingsAsync();
+
+        Assert.AreEqual("简体中文", form.LanguageComboBox.Text);
+        Assert.AreEqual("备份", form.WorkspaceTabs.TabPages[0].Text);
+        Assert.AreEqual("操作指导", form.WorkspaceTabs.TabPages[1].Text);
+        Assert.AreEqual("关于作者", form.WorkspaceTabs.TabPages[2].Text);
+        Assert.IsNotNull(form.AuthorPictureBox.Image);
+        Assert.Contains("Amenenhe_ai", form.AuthorContactText.Text);
+
+        form.LanguageComboBox.SelectedIndex = 1;
+        Assert.AreEqual("Backup", form.WorkspaceTabs.TabPages[0].Text);
+        Assert.AreEqual("Guide", form.WorkspaceTabs.TabPages[1].Text);
+        Assert.AreEqual("About", form.WorkspaceTabs.TabPages[2].Text);
+        Assert.Contains("Amenenhe_ai", form.AuthorContactText.Text);
+        Assert.Contains("GitHub", form.AuthorContactText.Text);
+        using (var toolsDialog = new DependencyConsentDialog(ToolInventory.Empty))
+        {
+            Assert.AreEqual("Check and install tools", toolsDialog.Text);
+            Assert.Contains("App Installer", toolsDialog.ManualInstructions.Text);
+            Assert.AreEqual("Close(&C)", toolsDialog.DeclineButton.Text);
+        }
+
+        form.LanguageComboBox.SelectedIndex = 0;
+        Assert.AreEqual("备份", form.WorkspaceTabs.TabPages[0].Text);
+    });
+
+    [TestMethod]
+    public void Login_failure_messages_include_safe_code_and_actionable_network_guidance()
+    {
+        string timeout = MainForm.ErrorText("AUTH_API_TIMEOUT");
+        Assert.Contains("AUTH_API_TIMEOUT", timeout);
+        Assert.Contains("网络", timeout);
+
+        string unknown = MainForm.ErrorText("UNMAPPED_FIXTURE_ERROR");
+        Assert.Contains("UNMAPPED_FIXTURE_ERROR", unknown);
+        Assert.DoesNotContain("C:\\", unknown);
+        Assert.DoesNotContain("token", unknown, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [TestMethod]
+    public void Connection_reset_code_explains_network_interruption_without_requesting_new_login()
+    {
+        string chinese = MainForm.ErrorText("NETWORK_CONNECTIONRESET");
+        Assert.Contains("中途断开", chinese);
+        Assert.Contains("代理", chinese);
+        Assert.DoesNotContain("目前无法判断", chinese);
+        Assert.DoesNotContain("重新登录", chinese);
+        string english = MainForm.ErrorText("NETWORK_CONNECTIONRESET", english: true);
+        Assert.Contains("interrupted", english);
+        Assert.Contains("NETWORK_CONNECTIONRESET", english);
+    }
+
+    [TestMethod]
+    public void Private_backup_root_read_acl_error_points_to_exact_path_repair_without_touching_contents()
+    {
+        string chinese = MainForm.ErrorText("PREFLIGHT_PRIVATE_READ_ACL_UNSAFE");
+        Assert.Contains("检查并修复权限", chinese);
+        Assert.Contains("准确目录", chinese);
+        Assert.Contains("不会更改目录内容", chinese);
+        string english = MainForm.ErrorText("PREFLIGHT_PRIVATE_READ_ACL_UNSAFE", english: true);
+        Assert.Contains("Check and fix permissions", english);
+        Assert.Contains("exact folder", english);
+        Assert.Contains("not its contents", english);
+        Assert.Contains("PREFLIGHT_PRIVATE_READ_ACL_UNSAFE", english);
+    }
+
+    [TestMethod]
+    [DataRow("Direct", "直接连接", "Direct")]
+    [DataRow("Windows system proxy", "Windows 系统代理", "Windows system proxy")]
+    [DataRow("Existing environment", "现有环境代理", "Existing environment proxy")]
+    public void Network_failure_shows_last_attempted_route_and_retains_confirmed_login(string route, string chineseRoute, string englishRoute) => UiTest.Run(async () =>
+    {
+        var failure = NetworkProbe.Failure(NetworkFailureKind.ConnectionReset);
+        var report = UiFixture.Ready with { NetworkReady = false, Issues = [new("NETWORK_CONNECTIONRESET", "", true) { NetworkFailure = failure }] };
+        var actions = new UiFixture().Actions with { Check = (_, _, _) => Task.FromResult(new EnvironmentStatus(report, ToolInventory.Empty, route, [], [])) };
+        using var form = new MainForm(actions); await form.LoadSettingsAsync();
+        form.ConsentCheckBox.Checked = true; await form.CurrentOperation;
+        await form.CheckEnvironmentAsync();
+        Assert.Contains("登录验证已通过", form.StatusLabel.Text);
+        Assert.Contains(chineseRoute, form.StatusLabel.Text);
+        Assert.Contains("中途断开", form.StatusLabel.Text);
+        Assert.IsFalse(form.StartButton.Enabled);
+        form.LanguageComboBox.SelectedIndex = 1;
+        Assert.Contains("Sign-in was verified", form.StatusLabel.Text);
+        Assert.Contains(englishRoute, form.StatusLabel.Text);
+    });
+
+    [TestMethod]
+    [DataRow("GIT_RUNTIME_COMMAND_FAILED")]
+    [DataRow("GIT_RUNTIME_GIT_PATH_INVALID")]
+    [DataRow("GIT_RUNTIME_CONFIG_QUERY_FAILED")]
+    [DataRow("GIT_HELPER_INVALID")]
+    public void Git_setup_failure_explains_the_failed_step_and_points_to_tools(string code)
+    {
+        string chinese = MainForm.ErrorText(code);
+        Assert.Contains(code, chinese);
+        Assert.Contains("Git", chinese);
+        Assert.Contains("检测与安装依赖", chinese);
+        string english = MainForm.ErrorText(code, english: true);
+        Assert.Contains(code, english);
+        Assert.Contains("Git", english);
+        Assert.Contains("Check and install tools", english);
+    }
+
+    [TestMethod]
     [DataRow("AUTH_KEYRING_TARGET_MISSING", "条目缺失")]
     [DataRow("AUTH_KEYRING_ENUMERATION_FAILED", "无法确认")]
     public void Auth_postcondition_warning_survives_workflow_cleanup_failure_and_retry(string code, string message) => UiTest.Run(async () =>

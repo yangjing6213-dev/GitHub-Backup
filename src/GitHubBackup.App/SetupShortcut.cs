@@ -21,6 +21,7 @@ internal static class SetupShortcut
             link.SetPath(target);
             link.SetArguments("");
             link.SetWorkingDirectory(workingDirectory);
+            link.SetIconLocation(target, 0);
             using var memory = new MemoryStream();
             ((IPersistStream)link).Save(new MemoryComStream(memory), true);
             if (memory.Length is <= 0 or > MaximumBytes)
@@ -55,6 +56,10 @@ internal static class SetupShortcut
                 link.GetWorkingDirectory(directory, directory.Capacity);
                 if (!string.Equals(directory.ToString(), workingDirectory, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("SETUP_SHORTCUT_WORKING_DIRECTORY_MISMATCH");
+                var iconPath = new StringBuilder(PathCapacity);
+                link.GetIconLocation(iconPath, iconPath.Capacity, out int iconIndex);
+                if (iconIndex != 0 || !string.Equals(iconPath.ToString(), target, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("SETUP_SHORTCUT_ICON_MISMATCH");
                 return true;
             });
         }

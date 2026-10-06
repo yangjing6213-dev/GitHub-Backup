@@ -2,16 +2,16 @@
 
 This document is a public summary, not the original machine/account diagnostic log and not an authorization receipt for installer acceptance.
 
-## Current follow-up status — 2026-10-04
+## Current follow-up status — 2026-10-07
 
-This section supersedes the historical snapshot below for the current local build. It does not claim that the package has been installed in a real user profile or released publicly.
+This section supersedes the historical snapshots below for the current local v4 build. The package has been installed on the development PC; public release status is separate and must be checked on GitHub.
 
-- Installer artifact: `GitHubBackup-setup.exe`, 92,445,219 bytes, SHA-256 `B8AFB5F8B5C047E0A743476C699EBC6DEA09B3FAD8B86C933F408BAB7469454F`.
-- Bundled app: one self-contained Windows x64 executable, 116,877,472 bytes, SHA-256 `6110E971830F1A4D0863EB9953FBF3A4884886152EDDC9FBD495845036134564`; file and installer static verification: PASS. The installer is unsigned.
-- The installer implementation is designed to create Desktop and Start Menu shortcuts and a per-user Windows uninstall registration. Actual display in Windows' Installed apps list has not been checked in a real profile.
-- Browser sign-in now attempts to open the fixed GitHub device-login page after the one-time code is issued; the user still completes sign-in manually. If opening fails, the app shows a manual fallback. The code is not put in the URL or persisted by this flow. The main window no longer gives its live log the initial focus.
-- Focused tests for the affected authentication, UI and setup areas: 117 passed, 0 failed, 0 skipped. A broader UI interaction test class previously had 8 environment-limited failures while creating restricted ACL fixtures; that broader result is not a pass.
-- Actual install/uninstall, Windows uninstall-list display, browser launch, real sign-in, backup, clean-machine use and restore: NOT_RUN. No real credentials, registry entries, account, or backup data were accessed by these checks. These build checks do not constitute real-user acceptance.
+- Installer artifact: `GitHubBackup-setup.exe`, 93,293,246 bytes, SHA-256 `937DDD6E89C1A72CD1C36766591B3AFEF2297DD316DC439DEE69F3050B1C751F`.
+- Bundled app: self-contained Windows x64 executable, SHA-256 `99571B5DD8C42CDE84475E3001D440895F43925E981A96652DD077908939BD08`. Installer and app static verification: PASS. The installer is unsigned.
+- Local replacement: old version uninstall and v4 install exited successfully; installed files, shortcuts, uninstall registration and receipt passed verification. Existing settings hash was unchanged.
+- Local backup: the user confirmed that a normal backup completed successfully with the installed app. This record relies on that confirmation; this documentation update did not inspect backup contents, credentials, or account data.
+- Related focused tests: 269 passed, 0 failed, 0 skipped. The broader test suite was not rerun for this package update.
+- Clean-PC use, installation on other computers/accounts, and restoring a backup: NOT_RUN. A successful backup on one PC does not establish compatibility with every network or repository.
 - Compatibility note: a schema-2 older install is not upgraded in place; its existing `Uninstall.exe` must be run first. If a current uninstall registration is missing, uninstall can proceed after validating the files, but a repair/reinstall through that missing registration remains fail-closed.
 
 ## Historical snapshot — 2026-10-03 (superseded above)

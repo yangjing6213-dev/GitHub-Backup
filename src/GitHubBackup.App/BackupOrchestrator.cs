@@ -100,6 +100,7 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         private readonly DateTimeOffset started = DateTimeOffset.UtcNow;
         private readonly ManifestStore manifests = new();
         private readonly HashSet<string> failed = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> failureDiagnosticCounts = new(StringComparer.Ordinal);
         private readonly List<AtomicFileCleanupException> ownedFiles = [];
         private OperationLockLease? owner;
         private BackupRunContext? context;
@@ -197,7 +198,7 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                     phase = "mirror";
                     progress?.Report(new(phase, repository.Name, currentIndex, repositoryCount, logger.GetTail()));
                     var core = await backup.BackupAsync(repository, context, repositoryLock, token).ConfigureAwait(false);
-                    Record(repository, core);
+                    await RecordAsync(repository, core).ConfigureAwait(false);
                     if (core.CoreFailed)
                     {
                         skipped++;
@@ -210,7 +211,7 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                     }
                     phase = "wiki";
                     progress?.Report(new(phase, repository.Name, currentIndex, repositoryCount, logger.GetTail()));
-                    Record(repository, await backup.BackupWikiAsync(repository, context, repositoryLock, token).ConfigureAwait(false));
+                    await RecordAsync(repository, await backup.BackupWikiAsync(repository, context, repositoryLock, token).ConfigureAwait(false)).ConfigureAwait(false);
                     phase = "metadata";
                     progress?.Report(new(phase, repository.Name, currentIndex, repositoryCount, logger.GetTail()));
                     string metadata = Path.Combine(ownerRoot, "metadata", repository.LocalName); CreateDirectory(metadata);
@@ -246,7 +247,8 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 if (ex is AtomicFileCleanupException cleanup) ownedFiles.Add(cleanup);
                 cancelled = token.IsCancellationRequested;
                 RecordNetworkFailure(ex);
-                error = ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited } ? "HTTP_RATE_LIMITED"
+                error = ex is AuthBoundaryException ? "BACKUP_AUTH_INVALID"
+                    : ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited } ? "HTTP_RATE_LIMITED"
                     : ex is ReleaseException { Code: "BACKUP_INSUFFICIENT_FREE_SPACE" } ? "BACKUP_INSUFFICIENT_FREE_SPACE"
                     : phase == "lock" ? "BACKUP_OWNER_LOCK_UNAVAILABLE" : phase == "recovery" ? "PROMOTION_RECOVERY_REQUIRED" : "BACKUP_FAILED";
             }
@@ -260,13 +262,29 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 networkFailure = new(false, NetworkFailureKind.RateLimited, limited.RateLimitReset, "HTTP_RATE_LIMITED");
         }
 
-        private void Record(RepositoryDescriptor repository, RepositoryStepResult step)
+        private async Task RecordAsync(RepositoryDescriptor repository, RepositoryStepResult step)
         {
             warnings += step.WarningCount; skipped += step.SkippedWikiCount;
-            if (step.CoreFailed) failed.Add(repository.LocalName);
+            if (step.CoreFailed)
+            {
+                failed.Add(repository.LocalName);
+                string code = step.ErrorCodes.LastOrDefault() ?? "MIRROR_BACKUP_FAILED";
+                if (!IsSafeDiagnosticCode(code)) code = "MIRROR_BACKUP_FAILED";
+                failureDiagnosticCounts[code] = failureDiagnosticCounts.GetValueOrDefault(code) + 1;
+                if (logger is not null)
+                {
+                    await logger.WriteAsync(LogLevel.Error, "mirror", null,
+                        "MIRROR_FAILURE " + code, CancellationToken.None).ConfigureAwait(false);
+                    progress?.Report(new("mirror", null, 0, 0, logger.GetTail()));
+                }
+            }
             if (step.Critical) throw new IOException("PROMOTION_RECOVERY_REQUIRED");
             if (step.Cancelled) throw new OperationCanceledException();
         }
+        private static bool IsSafeDiagnosticCode(string code) => code.Length is > 0 and <= 80
+            && code.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
+        private string MirrorFailureCode() => failureDiagnosticCounts.Count == 1
+            ? failureDiagnosticCounts.Keys.Single() : "MIRROR_BACKUP_FAILED";
         private long FreeBytes() => availableBytes?.Invoke(request.Settings.BackupRoot)
             ?? new DriveInfo(Path.GetPathRoot(request.Settings.BackupRoot)!).AvailableFreeSpace;
         private void RequireSpace(long required)
@@ -282,7 +300,7 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         private BackupSummary Summary() => new(2, request.Mode, started, DateTimeOffset.UtcNow,
             failed.Count != 0 ? RunStatus.Fail : cancelled ? RunStatus.Cancelled : error.Length != 0 ? RunStatus.Fail : warnings != 0 ? RunStatus.Partial : RunStatus.Pass,
             cancelled, request.Settings.Owner, runId, repositoryCount, warnings, failed.Order(StringComparer.OrdinalIgnoreCase).ToArray(), skipped,
-            error.Length != 0 ? phase : failed.Count != 0 ? "mirror" : "", error.Length != 0 ? error : failed.Count != 0 ? "MIRROR_BACKUP_FAILED" : "",
+            error.Length != 0 ? phase : failed.Count != 0 ? "mirror" : "", error.Length != 0 ? error : failed.Count != 0 ? MirrorFailureCode() : "",
             ownerRoot, manifest, log);
         private async Task RecoverAsync()
         {
@@ -332,10 +350,16 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
             if (writesStarted && !finalized)
             {
                 summary ??= Summary();
-                if (logger is not null) await logger.WriteAsync(LogLevel.Info, "complete", null,
-                    summary.Status.ToString().ToUpperInvariant(), CancellationToken.None).ConfigureAwait(false);
                 if (logger is not null)
                 {
+                    foreach (var diagnostic in failureDiagnosticCounts.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                        await logger.WriteAsync(LogLevel.Error, "mirror", null,
+                            $"MIRROR_FAILURE_CATEGORY {diagnostic.Key} COUNT {diagnostic.Value}", CancellationToken.None).ConfigureAwait(false);
+                    if (failed.Count != 0 && failureDiagnosticCounts.Count == 0)
+                        await logger.WriteAsync(LogLevel.Error, "mirror", null,
+                            $"MIRROR_FAILURE_CATEGORY MIRROR_BACKUP_FAILED COUNT {failed.Count}", CancellationToken.None).ConfigureAwait(false);
+                    await logger.WriteAsync(LogLevel.Info, "complete", null,
+                        summary.Status.ToString().ToUpperInvariant(), CancellationToken.None).ConfigureAwait(false);
                     progress?.Report(new("cleanup", null, 0, 0, logger.GetTail()));
                     await logger.DisposeAsync().ConfigureAwait(false); logger = null;
                 }

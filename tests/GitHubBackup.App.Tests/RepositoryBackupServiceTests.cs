@@ -7,6 +7,77 @@ namespace GitHubBackup.App.Tests;
 public sealed class RepositoryBackupServiceTests
 {
     [TestMethod]
+    public async Task Clone_retries_with_windows_proxy_after_current_route_is_refused()
+    {
+        await using var f=await MirrorFixture.CreateAsync(systemProxy:new Uri("http://system-proxy:8080"));
+        var cloneRoutes=new List<string>();
+        f.Runner.FailConnection=request=>
+        {
+            if(!request.Arguments.Contains("clone"))return false;
+            string route=GitHttpProxy(request);cloneRoutes.Add(route);
+            return route!="http://system-proxy:8080/";
+        };
+
+        var result=await f.Service.BackupAsync(f.Repository,f.Context,f.RepositoryLock,default);
+
+        Assert.IsFalse(result.CoreFailed,string.Join(',',result.ErrorCodes));
+        CollectionAssert.AreEqual(new[] { "", "", "", "http://system-proxy:8080/" },cloneRoutes.ToArray());
+        var lfsFetch=f.Runner.Requests.Single(request=>request.FilePath.EndsWith("git-lfs.exe",StringComparison.OrdinalIgnoreCase)&&request.Arguments[0]=="fetch");
+        Assert.AreEqual("http://system-proxy:8080/",GitHttpProxy(lfsFetch),"A successful fallback should be reused for the rest of this backup session.");
+    }
+
+    [TestMethod]
+    public async Task Existing_mirror_fetch_uses_windows_proxy_after_current_route_is_refused()
+    {
+        await using var f=await MirrorFixture.CreateAsync(systemProxy:new Uri("http://system-proxy:8080"));
+        f.Seed();
+        var fetchRoutes=new List<string>();
+        f.Runner.FailConnection=request=>
+        {
+            if(request.FilePath.EndsWith("git-lfs.exe",StringComparison.OrdinalIgnoreCase)||!request.Arguments.Contains("fetch"))return false;
+            string route=GitHttpProxy(request);fetchRoutes.Add(route);
+            return route!="http://system-proxy:8080/";
+        };
+
+        var result=await f.Service.BackupAsync(f.Repository,f.Context,f.RepositoryLock,default);
+
+        Assert.IsFalse(result.CoreFailed,string.Join(',',result.ErrorCodes));
+        CollectionAssert.AreEqual(new[] { "", "", "", "http://system-proxy:8080/" },fetchRoutes.ToArray());
+        var lfsFetch=f.Runner.Requests.Single(request=>request.FilePath.EndsWith("git-lfs.exe",StringComparison.OrdinalIgnoreCase)&&request.Arguments[0]=="fetch");
+        Assert.AreEqual("http://system-proxy:8080/",GitHttpProxy(lfsFetch));
+    }
+
+    [TestMethod]
+    public async Task Clone_does_not_switch_routes_for_authorization_failure()
+    {
+        await using var f=await MirrorFixture.CreateAsync(systemProxy:new Uri("http://system-proxy:8080"));
+        f.Runner.NetworkDiagnostic=request=>request.Arguments.Contains("clone")
+            ? "fatal: unable to access 'https://github.com/fixture-user/repo.git/': The requested URL returned error: 401\n"
+            : null;
+
+        var result=await f.Service.BackupAsync(f.Repository,f.Context,f.RepositoryLock,default);
+
+        Assert.IsTrue(result.CoreFailed);
+        var clone=f.Runner.Requests.Where(request=>request.Arguments.Contains("clone")).ToArray();
+        Assert.HasCount(1,clone);
+        Assert.AreEqual("",GitHttpProxy(clone[0]));
+    }
+
+    [TestMethod]
+    public async Task Clone_keeps_retrying_current_route_when_no_system_proxy_exists()
+    {
+        await using var f=await MirrorFixture.CreateAsync();
+        f.Runner.FailConnection=request=>request.Arguments.Contains("clone");
+
+        var result=await f.Service.BackupAsync(f.Repository,f.Context,f.RepositoryLock,default);
+
+        Assert.IsTrue(result.CoreFailed);
+        var clone=f.Runner.Requests.Where(request=>request.Arguments.Contains("clone")).ToArray();
+        Assert.HasCount(3,clone);
+        Assert.IsTrue(clone.All(request=>GitHttpProxy(request)==""));
+    }
+
+    [TestMethod]
     [DataRow(96)][DataRow(97)][DataRow(98)][DataRow(99)][DataRow(100)]
     public async Task Legal_long_wiki_names_transfer_and_recover_with_canonical_sanitization(int length)
     {
@@ -84,8 +155,9 @@ public sealed class RepositoryBackupServiceTests
         if(existing) f.Seed();
         var result=await f.Service.BackupAsync(f.Repository,f.Context,f.RepositoryLock,default);
         Assert.IsFalse(result.CoreFailed,string.Join(',',result.ErrorCodes)); Assert.AreEqual(0,result.WarningCount);
-        string[] actual=f.Runner.Requests.Select(r=>r.Arguments.Contains("rev-parse")?"identity":r.Arguments.Contains("clone")?"clone":r.FilePath.EndsWith("git-lfs.exe")?"lfs-"+r.Arguments[0]:r.Arguments.Contains("fetch")?"fetch":"fsck").ToArray();
-        CollectionAssert.AreEqual(existing?new[]{"identity","fetch","lfs-fetch","lfs-fsck","fsck"}:new[]{"clone","identity","lfs-fetch","lfs-fsck","fsck"},actual);
+        string[] actual=f.Runner.Requests.Select(r=>r.Arguments.Contains("rev-parse")?"identity":r.Arguments.Contains("clone")?"clone":r.FilePath.EndsWith("git-lfs.exe")?"lfs-"+r.Arguments[0]:r.Arguments.Contains("fetch")?"fetch":r.Arguments.Contains("show-ref")?"has-refs":"fsck").ToArray();
+        string[] expected=existing?new[]{"identity","fetch","lfs-fetch","has-refs","lfs-fsck","fsck"}:new[]{"clone","identity","lfs-fetch","has-refs","lfs-fsck","fsck"};
+        CollectionAssert.AreEqual(expected,actual,$"Unexpected request sequence: {string.Join(",",actual)}");
         foreach(var request in f.Runner.Requests)
         {
             Assert.AreNotEqual(f.Final,request.WorkingDirectory); Assert.IsFalse(request.Arguments.Contains(f.Final));
@@ -153,6 +225,14 @@ public sealed class RepositoryBackupServiceTests
         Assert.IsFalse(f.Runner.Requests.Any(x=>x.FilePath.EndsWith("git-lfs.exe")));
         Assert.IsTrue(f.Runner.Requests[0].Arguments.Contains("https://github.com/fixture-user/repo.wiki.git"));
     }
+
+    private static string GitHttpProxy(ProcessRequest request)
+    {
+        int count=int.Parse(request.Environment["GIT_CONFIG_COUNT"]!,System.Globalization.CultureInfo.InvariantCulture);
+        for(int i=0;i<count;i++)
+            if(request.Environment[$"GIT_CONFIG_KEY_{i}"]=="http.proxy")return request.Environment[$"GIT_CONFIG_VALUE_{i}"]??"";
+        throw new AssertFailedException("No pinned Git HTTP proxy setting was supplied.");
+    }
 }
 
 internal sealed class MirrorFixture : IAsyncDisposable
@@ -167,10 +247,11 @@ internal sealed class MirrorFixture : IAsyncDisposable
     internal RepositoryBackupService Service=>new(Runner);
     internal string Final=>Path.Combine(Preflight.OwnerRoot,"mirrors","repo.git");
     internal string Staging=>Path.Combine(Preflight.OwnerRoot,"mirrors",".repo.git.staging-test");
-    internal static async Task<MirrorFixture> CreateAsync(bool deleted=false,bool realGit=false,string? backupRoot=null,string? fixtureRoot=null,RepositoryDescriptor? repository=null)
+    internal static async Task<MirrorFixture> CreateAsync(bool deleted=false,bool realGit=false,string? backupRoot=null,string? fixtureRoot=null,RepositoryDescriptor? repository=null,Uri? systemProxy=null)
     {
         repository??=PreflightFixture.Repository;
         var f=new MirrorFixture(backupRoot,fixtureRoot); f.Preflight.Repositories=[repository];
+        f.Preflight.SystemProxy=systemProxy;
         if(realGit)f.Preflight.Tools=f.Preflight.Tools with{Git=LocalGitRunner.Git};
         f.Session=(await f.Preflight.Check()).LiveSession!;
         var mappings=RepositoryNameMapper.Reconcile(f.Preflight.OwnerRoot,deleted?[repository]:[],deleted?[]:[repository],[]);
@@ -208,11 +289,23 @@ internal sealed class MirrorRunner : IProcessRunner
     internal string Fault="";
     internal Action<string>? OnLfsFetch;
     internal Action<ProcessRequest>? BeforeRun;
+    internal Func<ProcessRequest,bool>? FailConnection;
+    internal Func<ProcessRequest,string?>? NetworkDiagnostic;
     public Task<ProcessResult> RunAsync(ProcessRequest request,OperationJob job,IProgress<string>? progress,CancellationToken token)
     {
         token.ThrowIfCancellationRequested(); Requests.Add(request);BeforeRun?.Invoke(request);
         bool clone=request.Arguments.Contains("clone"), identity=request.Arguments.Contains("rev-parse"), lfs=request.FilePath.EndsWith("git-lfs.exe");
         string step=clone?"clone":identity?"identity":lfs?"lfs-"+request.Arguments[0]:request.Arguments.Contains("fetch")?"fetch":"core-fsck";
+        if(FailConnection?.Invoke(request)==true)
+        {
+            progress?.Report("fatal: unable to access 'https://github.com/fixture-user/repo.git/': Could not connect to server\n");
+            return Task.FromResult(new ProcessResult(1,false,false,[],[]));
+        }
+        if(NetworkDiagnostic?.Invoke(request) is { } diagnostic)
+        {
+            progress?.Report(diagnostic);
+            return Task.FromResult(new ProcessResult(1,false,false,[],[]));
+        }
         if((clone||step=="fetch")&&Fault is "not-found" or "other" or "not-found-wrong-endpoint")
         {
             progress?.Report(Fault=="not-found"?"remote: Repository not found.\nfatal: repository 'https://github.com/fixture-user/repo.wiki.git/' not found\n"

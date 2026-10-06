@@ -10,6 +10,25 @@ namespace GitHubBackup.App.Tests;
 public sealed class PreflightServiceTests
 {
     [TestMethod]
+    [DataRow("setup", "GIT_RUNTIME_COMMAND_FAILED")]
+    [DataRow("query", "GIT_RUNTIME_CONFIG_QUERY_FAILED")]
+    [DataRow("invalid-helper", "GIT_HELPER_INVALID")]
+    [DataRow("invalid-path", "GIT_RUNTIME_GIT_PATH_INVALID")]
+    public async Task Git_setup_failures_keep_specific_safe_code_and_release_resources(string stage, string expectedCode)
+    {
+        using var h = new PreflightFixture { RuntimeFailureStage = stage, InvalidHelper = stage == "invalid-helper" };
+        if (stage == "invalid-path") h.Tools = h.Tools with { Git = h.Tools.Git! with { AbsolutePath = @"C:\invalid;lookup\git.exe" } };
+        var result = await h.Check();
+        Assert.IsNull(result.LiveSession);
+        Assert.IsFalse(result.Snapshot.Report.CanStartBackup);
+        var issue = result.Snapshot.Report.Issues.Single();
+        Assert.AreEqual(expectedCode, issue.ErrorCode);
+        Assert.DoesNotContain("PRIVATE_RAW_EXCEPTION", issue.UserMessage);
+        Assert.AreEqual(0, h.Discoveries);
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
     public async Task Native_preflight_requires_saved_consent_before_credential_read_or_discovery()
     {
         using var h = new PreflightFixture();
@@ -75,7 +94,7 @@ public sealed class PreflightServiceTests
     [DataRow("/user/repos")]
     public async Task Native_cancellation_during_binding_or_discovery_releases_transport_and_lease(string cancelPath)
     {
-        using var h = new PreflightFixture();
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
         var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
         { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
         await new SettingsStore(h.Paths).SaveAsync(settings, default);
@@ -88,6 +107,7 @@ public sealed class PreflightServiceTests
 
         Assert.IsNull(result.LiveSession);
         Assert.IsTrue(result.Snapshot.Report.Issues.Any(issue => issue.ErrorCode == "PREFLIGHT_CANCELLED"));
+        Assert.AreEqual(0, h.Resolutions);
         Assert.IsTrue(reader.Secret!.All(value => value == 0));
         Assert.IsTrue(handler.Disposed);
         Assert.IsTrue(h.Job.IsCancellationRequested);
@@ -255,7 +275,8 @@ public sealed class PreflightServiceTests
     {
         var probe = new NetworkProbe(h.Runner);
         return new PreflightService(h.Auth, h.Runner, (_,_) => Task.FromResult(h.Tools), h.Environment,
-            new ProxyScope(probe, new Dictionary<string,string?>(), origin => origin), h.Audit,
+            new ProxyScope(probe, new Dictionary<string,string?>(), origin =>
+            { h.Resolutions++; h.OnResolve?.Invoke(); return h.SystemProxy ?? origin; }), h.Audit,
             new(_ => DriveType.Fixed, path => File.Exists(path) || Directory.Exists(path) ? File.GetAttributes(path) : null,
                 (_,_) => Task.CompletedTask), _ => 1073741824);
     }
@@ -264,10 +285,12 @@ public sealed class PreflightServiceTests
     {
         internal int Reads;
         internal byte[]? Secret;
+        internal readonly List<byte[]> Secrets = [];
         public GitHubCredentialLease ReadExact(string login)
         {
             Reads++;
             Secret = "SYNTHETIC_PREFLIGHT_SECRET"u8.ToArray();
+            Secrets.Add(Secret);
             return new GitHubCredentialLease(login, Secret);
         }
     }
@@ -281,6 +304,8 @@ public sealed class PreflightServiceTests
         internal int DisposeAttempts;
         internal bool BadDiscovery;
         internal bool BadUser;
+        internal string? DiscoveryBody;
+        internal Func<string,HttpResponseMessage?>? OverrideResponse;
         internal string? CancelPath;
         internal CancellationTokenSource? Cancellation;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -292,9 +317,11 @@ public sealed class PreflightServiceTests
                 Cancellation!.Cancel();
                 cancellationToken.ThrowIfCancellationRequested();
             }
+            var overridden = OverrideResponse?.Invoke(request.RequestUri.AbsolutePath);
+            if (overridden is not null) return Task.FromResult(overridden);
             byte[] body = request.RequestUri.AbsolutePath == "/user"
                 ? BadUser ? "invalid"u8.ToArray() : "{\"login\":\"fixture-user\",\"id\":7}"u8.ToArray()
-                : BadDiscovery ? "invalid"u8.ToArray() : "[]"u8.ToArray();
+                : BadDiscovery ? "invalid"u8.ToArray() : Encoding.UTF8.GetBytes(DiscoveryBody ?? "[]");
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) });
         }
         protected override void Dispose(bool disposing)
@@ -337,6 +364,343 @@ public sealed class PreflightServiceTests
         Assert.ThrowsExactly<ObjectDisposedException>(() => session.CreateEnvironment());
         File.Move(h.Hosts, h.Hosts + ".moved"); File.Move(h.Hosts + ".moved", h.Hosts);
     }
+    [TestMethod]
+    public async Task Actual_repository_reset_rechecks_the_complete_route_before_selecting_system_proxy()
+    {
+        using var h = new PreflightFixture
+        {
+            Repositories = [PreflightFixture.Repository],
+            RepositoryFailure = "Recv failure: Connection was reset",
+            FailOnlyDirect = true,
+            SystemProxy = new("http://127.0.0.1:8080")
+        };
+
+        var result = await h.Check();
+        await using var session = result.LiveSession;
+
+        Assert.IsNotNull(session, string.Join(",", result.Snapshot.Report.Issues.Select(issue => issue.ErrorCode)));
+        Assert.IsTrue(result.Snapshot.Report.CanStartBackup);
+        Assert.AreEqual("Windows system proxy", result.Snapshot.SelectedProxyProfile.DisplayName);
+        Assert.AreEqual(2, h.Discoveries);
+        Assert.AreEqual(2, h.Resolutions);
+        Assert.AreEqual(2, h.Runner.Requests.Count(request => request.Arguments.Contains(NetworkProbe.PublicGitProbeUrl)));
+        Assert.AreEqual(4, h.Runner.Requests.Count(request => request.Arguments.Contains(PreflightFixture.Repository.Url)));
+        var setups = h.Runner.Requests.Where(request => request.Arguments.Contains("setup-git")).ToArray();
+        Assert.HasCount(2, setups);
+        Assert.AreNotEqual(setups[0].Environment["GIT_CONFIG_GLOBAL"], setups[1].Environment["GIT_CONFIG_GLOBAL"]);
+        Assert.IsFalse(Directory.Exists(Path.GetDirectoryName(setups[0].Environment["GIT_CONFIG_GLOBAL"])));
+        Assert.AreEqual("http://127.0.0.1:8080/", session.CreateEnvironment()["HTTPS_PROXY"]);
+        Assert.IsFalse(h.Job.IsCancellationRequested);
+    }
+
+    [TestMethod]
+    public async Task Actual_repository_reset_on_both_routes_keeps_last_profile_and_confirmed_authentication()
+    {
+        using var h = new PreflightFixture
+        {
+            Repositories = [PreflightFixture.Repository], RepositoryFailure = "Recv failure: Connection was reset",
+            SystemProxy = new("http://127.0.0.1:8080")
+        };
+        var result = await h.Check();
+        Assert.IsNull(result.LiveSession);
+        Assert.IsTrue(result.Snapshot.Report.AuthReady);
+        Assert.IsTrue(result.Snapshot.Report.OwnerMatches);
+        Assert.IsTrue(result.Snapshot.Report.RepositoryVisibilityKnown);
+        Assert.IsFalse(result.Snapshot.Report.NetworkReady);
+        Assert.AreEqual("Windows system proxy", result.Snapshot.SelectedProxyProfile.DisplayName);
+        var issue = result.Snapshot.Report.Issues.Single();
+        Assert.AreEqual("NETWORK_CONNECTIONRESET", issue.ErrorCode);
+        Assert.AreEqual(NetworkFailureKind.ConnectionReset, issue.NetworkFailure!.FailureKind);
+        Assert.AreEqual(2, h.Resolutions);
+        Assert.AreEqual(6, h.Runner.Requests.Count(request => request.Arguments.Contains(PreflightFixture.Repository.Url)));
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    public async Task Public_git_failure_does_not_claim_that_unchecked_authentication_requires_login()
+    {
+        using var h = new PreflightFixture { PublicGitFailure = "Recv failure: Connection was reset" };
+        var result = await h.Check();
+        var issue = result.Snapshot.Report.Issues.Single();
+        Assert.AreEqual("NETWORK_CONNECTIONRESET", issue.ErrorCode);
+        Assert.AreEqual(NetworkFailureKind.ConnectionReset, issue.NetworkFailure!.FailureKind);
+        Assert.IsFalse(h.Runner.Requests.Any(request => request.Arguments[0] == "auth" || request.Arguments[0] == "api"));
+        Assert.IsFalse(result.Snapshot.Report.AuthReady);
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    [DataRow("The requested URL returned error: 401", 1)]
+    [DataRow("The requested URL returned error: 403", 1)]
+    [DataRow("The requested URL returned error: 404", 1)]
+    [DataRow("The requested URL returned error: 407", 1)]
+    [DataRow("SSL certificate problem: unable to get local issuer certificate", 1)]
+    [DataRow("The requested URL returned error: 429", 1)]
+    [DataRow("The requested URL returned error: 503", 3)]
+    [DataRow("unrecognized failure", 1)]
+    public async Task Actual_repository_nonconnection_failure_never_switches_routes(string failure, int attempts)
+    {
+        using var h = new PreflightFixture
+        {
+            Repositories = [PreflightFixture.Repository], RepositoryFailure = failure,
+            SystemProxy = new("http://127.0.0.1:8080")
+        };
+        var result = await h.Check();
+        Assert.IsNull(result.LiveSession);
+        Assert.AreEqual(0, h.Resolutions);
+        Assert.AreEqual(attempts, h.Runner.Requests.Count(request => request.Arguments.Contains(PreflightFixture.Repository.Url)));
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    public async Task Cancellation_during_actual_repository_check_never_starts_the_next_route()
+    {
+        using var h = new PreflightFixture { Repositories = [PreflightFixture.Repository], SystemProxy = new("http://127.0.0.1:8080") };
+        using var cancellation = new CancellationTokenSource();
+        h.BeforeProcess = request => { if (request.Arguments.Contains(PreflightFixture.Repository.Url)) cancellation.Cancel(); };
+        var result = await h.Check(cancellation.Token);
+        Assert.IsTrue(result.Snapshot.Report.Issues.Any(issue => issue.ErrorCode == "PREFLIGHT_CANCELLED"));
+        Assert.AreEqual(0, h.Resolutions);
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    [DataRow("/user")]
+    [DataRow("/user/repos")]
+    [DataRow("repository")]
+    public async Task Native_route_fallback_releases_and_rebinds_all_identity_resources(string failurePhase)
+    {
+        using var h = new PreflightFixture
+        {
+            RepositoryFailure = failurePhase == "repository" ? "Recv failure: Connection was reset" : "",
+            FailOnlyDirect = true, SystemProxy = new("http://127.0.0.1:8080")
+        };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var direct = new NativeHandler
+        {
+            DiscoveryBody = PreflightFixture.RepositoryJson,
+            OverrideResponse = path => path == failurePhase
+                ? throw new HttpRequestException("SYNTHETIC_PRIVATE", new SocketException((int)SocketError.ConnectionReset)) : null
+        };
+        var system = new NativeHandler { DiscoveryBody = PreflightFixture.RepositoryJson };
+        h.OnResolve = () =>
+        {
+            Assert.IsTrue(direct.Disposed);
+            Assert.IsTrue(reader.Secrets[0].All(value => value == 0));
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+            var firstSetup = h.Runner.Requests.First(request => request.Arguments.Contains("setup-git"));
+            Assert.IsFalse(Directory.Exists(Path.GetDirectoryName(firstSetup.Environment["GIT_CONFIG_GLOBAL"])));
+            File.Move(h.Hosts, h.Hosts + ".moved"); File.Move(h.Hosts + ".moved", h.Hosts);
+        };
+        var result = await NativeService(h).CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default,
+            sockets => sockets.UseProxy ? system : direct);
+        await using var session = result.LiveSession;
+        Assert.IsNotNull(session, string.Join(",", result.Snapshot.Report.Issues.Select(issue => issue.ErrorCode)));
+        Assert.AreEqual(2, reader.Reads);
+        Assert.AreEqual(2, h.Resolutions);
+        Assert.AreEqual("Windows system proxy", result.Snapshot.SelectedProxyProfile.DisplayName);
+        Assert.AreEqual("http://127.0.0.1:8080/", session.CreateEnvironment()["HTTPS_PROXY"]);
+        Assert.AreEqual(7L, session.HttpTransport!.BoundAccountId);
+        CollectionAssert.AreEqual(new[] { "/user", "/user/repos" }, system.Paths);
+        Assert.IsFalse(system.Disposed);
+        Assert.IsTrue(reader.Secrets[1].Any(value => value != 0));
+        Assert.IsFalse(h.Job.IsCancellationRequested);
+        await session.DisposeAsync();
+        Assert.IsTrue(reader.Secrets.All(secret => secret.All(value => value == 0)));
+    }
+
+    [TestMethod]
+    [DataRow("/user")]
+    [DataRow("/user/repos")]
+    public async Task Native_authorization_denial_is_typed_and_does_not_switch_routes(string failurePath)
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handler = new NativeHandler { OverrideResponse = path => path == failurePath ? new(HttpStatusCode.Unauthorized) : null };
+        var result = await NativeService(h).CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ => handler);
+        var issue = result.Snapshot.Report.Issues.Single();
+        Assert.AreEqual("HTTP_STATUS_401", issue.ErrorCode);
+        Assert.AreEqual(NetworkFailureKind.Unauthorized, issue.NetworkFailure!.FailureKind);
+        Assert.IsFalse(result.Snapshot.Report.AuthReady);
+        Assert.AreEqual(0, h.Resolutions);
+        Assert.AreEqual(1, handler.Paths.Count(path => path == failurePath));
+        Assert.IsTrue(handler.Disposed);
+        Assert.IsTrue(reader.Secret!.All(value => value == 0));
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    public async Task Account_change_between_routes_is_revalidated_before_another_credential_read()
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handler = new NativeHandler { OverrideResponse = _ => throw new HttpRequestException("SYNTHETIC_PRIVATE", new SocketException((int)SocketError.ConnectionReset)) };
+        h.OnResolve = () => File.WriteAllText(h.Hosts, PreflightFixture.Metadata.Replace("fixture-user", "changed-user"));
+        var result = await NativeService(h).CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ => handler);
+        Assert.IsNull(result.LiveSession);
+        Assert.AreEqual("AUTH_LOGIN_MISMATCH", result.Snapshot.Report.Issues.Single().ErrorCode);
+        Assert.AreEqual("Windows system proxy", result.Snapshot.SelectedProxyProfile.DisplayName);
+        Assert.AreEqual(1, reader.Reads);
+        Assert.IsTrue(reader.Secret!.All(value => value == 0));
+        Assert.IsTrue(handler.Disposed);
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    public async Task Native_successful_binding_revalidates_authentication_before_discovery()
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handler = new NativeHandler { OverrideResponse = _ => { File.WriteAllText(h.Hosts, ""); return null; } };
+        var result = await NativeService(h).CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ => handler);
+        Assert.IsNull(result.LiveSession);
+        Assert.IsFalse(result.Snapshot.Report.AuthReady);
+        Assert.IsTrue(result.Snapshot.Report.Issues.Single().ErrorCode.StartsWith("AUTH_", StringComparison.Ordinal));
+        CollectionAssert.AreEqual(new[] { "/user" }, handler.Paths);
+        Assert.AreEqual(0, h.Resolutions);
+        Assert.AreEqual(1, reader.Reads);
+        Assert.IsTrue(reader.Secret!.All(value => value == 0));
+        Assert.IsTrue(handler.Disposed);
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Native_binding_authentication_change_stops_fallback_and_preserves_failed_cleanup(bool cleanupFails)
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handler = new NativeHandler
+        {
+            DisposeFailuresRemaining = cleanupFails ? 2 : 0,
+            OverrideResponse = _ =>
+            {
+                File.WriteAllText(h.Hosts, "");
+                throw new HttpRequestException("SYNTHETIC_PRIVATE", new SocketException((int)SocketError.ConnectionReset));
+            }
+        };
+        var service = NativeService(h);
+        PreflightCheckResult? result = null;
+        try
+        {
+            result = await service.CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ => handler);
+            Assert.IsNull(result.LiveSession);
+            Assert.IsFalse(result.Snapshot.Report.AuthReady);
+            Assert.IsTrue(result.Snapshot.Report.Issues.Any(issue => issue.ErrorCode.StartsWith("AUTH_", StringComparison.Ordinal)));
+            Assert.AreEqual(0, h.Resolutions);
+            Assert.AreEqual(1, reader.Reads);
+            Assert.IsTrue(reader.Secret!.All(value => value == 0));
+            Assert.AreEqual(cleanupFails, service.HasPendingCleanup);
+            Assert.AreEqual(cleanupFails ? 2 : 1, handler.DisposeAttempts);
+        }
+        finally
+        {
+            handler.DisposeFailuresRemaining = 0;
+            await service.RetryCleanupAsync();
+        }
+        Assert.IsTrue(handler.Disposed);
+        Assert.IsFalse(service.HasPendingCleanup);
+        h.AssertFailedCleanup(result!);
+    }
+
+    [TestMethod]
+    public async Task Native_candidate_cleanup_failure_retains_resources_and_prevents_route_fallback()
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handler = new NativeHandler
+        {
+            DisposeFailuresRemaining = 1,
+            OverrideResponse = path => path == "/user/repos"
+                ? throw new HttpRequestException("SYNTHETIC_PRIVATE", new SocketException((int)SocketError.ConnectionReset)) : null
+        };
+        var service = NativeService(h);
+        try
+        {
+            var result = await service.CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ => handler);
+            Assert.IsNull(result.LiveSession);
+            Assert.AreEqual("PREFLIGHT_CLEANUP_FAILED", result.Snapshot.Report.Issues.Single().ErrorCode);
+            Assert.IsTrue(service.HasPendingCleanup);
+            Assert.AreEqual(0, h.Resolutions);
+            Assert.AreEqual(1, handler.DisposeAttempts);
+            Assert.IsTrue(reader.Secret!.All(value => value == 0));
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+            Assert.ThrowsExactly<IOException>(() => File.Move(h.Hosts, h.Hosts + ".moved"));
+        }
+        finally { await service.RetryCleanupAsync(); }
+        Assert.IsTrue(handler.Disposed);
+        Assert.IsFalse(service.HasPendingCleanup);
+        Assert.IsTrue(h.Job.IsCancellationRequested);
+        Assert.HasCount(0, Directory.GetDirectories(h.Root.Path, "GitHubBackup-git-*"));
+    }
+
+    [TestMethod]
+    public async Task Native_reset_on_both_routes_stops_after_two_fresh_transports()
+    {
+        using var h = new PreflightFixture { SystemProxy = new("http://127.0.0.1:8080") };
+        var settings = new AppSettings("fixture-user", h.BackupRoot, NetworkMode.Auto)
+        { ApiCredentialConsentVersion = 1, ApiCredentialConsentLogin = "fixture-user" };
+        await new SettingsStore(h.Paths).SaveAsync(settings, default);
+        var reader = new NativeReader();
+        var handlers = new List<NativeHandler>();
+        var result = await NativeService(h).CheckNativeAsync(BackupMode.Full, settings, h.Job, reader, default, _ =>
+        {
+            var handler = new NativeHandler { OverrideResponse = _ => throw new HttpRequestException("SYNTHETIC_PRIVATE", new SocketException((int)SocketError.ConnectionReset)) };
+            handlers.Add(handler);
+            return handler;
+        });
+        Assert.IsNull(result.LiveSession);
+        Assert.AreEqual("Windows system proxy", result.Snapshot.SelectedProxyProfile.DisplayName);
+        Assert.AreEqual(NetworkFailureKind.ConnectionReset, result.Snapshot.Report.Issues.Single().NetworkFailure!.FailureKind);
+        Assert.HasCount(2, handlers);
+        Assert.IsTrue(handlers.All(handler => handler.Calls == 3 && handler.Disposed));
+        Assert.AreEqual(2, reader.Reads);
+        Assert.IsTrue(reader.Secrets.All(secret => secret.All(value => value == 0)));
+        h.AssertFailedCleanup(result);
+    }
+
+    [TestMethod]
+    public async Task Active_candidate_runtime_prevents_fallback_until_explicit_cleanup()
+    {
+        using var h = new PreflightFixture
+        {
+            Repositories = [PreflightFixture.Repository], RepositoryFailure = "Recv failure: Connection was reset",
+            HoldRuntimeUse = true, SystemProxy = new("http://127.0.0.1:8080")
+        };
+        try
+        {
+            var result = await h.Check();
+            Assert.IsNull(result.LiveSession);
+            Assert.AreEqual("PREFLIGHT_CLEANUP_FAILED", result.Snapshot.Report.Issues.Single().ErrorCode);
+            Assert.IsTrue(h.Service!.HasPendingCleanup);
+            Assert.AreEqual(0, h.Resolutions);
+            Assert.IsFalse(h.Job.IsCancellationRequested);
+            Assert.ThrowsExactly<IOException>(() => File.Move(h.Hosts, h.Hosts + ".moved"));
+        }
+        finally { h.HeldRuntimeUse?.Dispose(); await h.Service!.RetryCleanupAsync(); }
+        Assert.IsFalse(h.Service.HasPendingCleanup);
+        Assert.HasCount(0, Directory.GetDirectories(h.Root.Path, "GitHubBackup-git-*"));
+    }
+
     [TestMethod]
     public async Task Public_git_success_does_not_hide_api_failure_or_trigger_nonconnection_fallback()
     {
@@ -507,6 +871,20 @@ public sealed class PreflightServiceTests
         Assert.HasCount(2,result.UnsafePaths); Assert.IsTrue(result.UnsafePaths.All(p => p.ErrorCode == "MIRROR_SOURCE_HARDLINK_REJECTED"));
     }
     [TestMethod]
+    public void Selected_backup_root_read_acl_is_repairable_without_changing_its_contents()
+    {
+        using var root = new StorageTestRoot();
+        StorageTestRoot.Grant(root.Path,FileSystemRights.Read);
+        var blocked = new SourceIntegrityAudit().ValidateBackupRoot(root.Path);
+        Assert.IsFalse(blocked.Allowed);
+        Assert.AreEqual("PREFLIGHT_PRIVATE_READ_ACL_UNSAFE",blocked.UnsafePaths.Single().ErrorCode);
+        int contentCountBefore = Directory.EnumerateFileSystemEntries(root.Path).Count();
+        AclPolicy.HardenExisting(root.Path,root.User,[root.Path]);
+        var repaired = new SourceIntegrityAudit().ValidateBackupRoot(root.Path);
+        Assert.IsTrue(repaired.Allowed);
+        Assert.AreEqual(contentCountBefore,Directory.EnumerateFileSystemEntries(root.Path).Count());
+    }
+    [TestMethod]
     public async Task Missing_drive_recommends_profile_root_and_safe_recheck_succeeds()
     {
         using var h = new PreflightFixture();
@@ -525,6 +903,8 @@ public sealed class PreflightServiceTests
         using var h = new PreflightFixture { Gate = "json-discovery" };
         var result = await h.Check(); Assert.IsNull(result.LiveSession); h.AssertFailedCleanup(result);
         Assert.IsFalse(result.Snapshot.Report.RepositoryVisibilityKnown);
+        Assert.AreEqual("PREFLIGHT_CHECK_FAILED", result.Snapshot.Report.Issues.Single().ErrorCode);
+        Assert.DoesNotContain("PRIVATE_RAW_EXCEPTION", result.Snapshot.Report.Issues.Single().UserMessage);
     }
     [TestMethod][DataRow("empty")][DataRow("login")][DataRow("config")]
     public async Task Real_runner_revalidates_auth_after_output_and_before_return(string mutation)
@@ -563,6 +943,7 @@ internal sealed class PreflightFixture : IDisposable
 {
     internal const string Metadata = "github.com:\n    git_protocol: https\n    users:\n        fixture-user: {}\n    user: fixture-user\n";
     internal const string Status = "{\"hosts\":{\"github.com\":[{\"state\":\"success\",\"active\":true,\"host\":\"github.com\",\"login\":\"fixture-user\",\"tokenSource\":\"keyring\"}]}}";
+    internal const string RepositoryJson = "[{\"id\":1,\"name\":\"repo\",\"full_name\":\"fixture-user/repo\",\"html_url\":\"https://github.com/fixture-user/repo\",\"owner\":{\"login\":\"fixture-user\",\"id\":7},\"size\":0,\"private\":false,\"archived\":false,\"fork\":false,\"has_wiki\":true}]";
     internal static RepositoryDescriptor Repository { get; } = new(1,"repo","fixture-user/repo","https://github.com/fixture-user/repo",false,false,false,true,null,0,"repo","");
     internal StorageTestRoot Root { get; }
     internal SecurityIdentifier User => Root.User;
@@ -572,23 +953,31 @@ internal sealed class PreflightFixture : IDisposable
     internal string Hosts => Path.Combine(Paths.AppGhConfigDirectory,"hosts.yml");
     internal IReadOnlyDictionary<string,string?> Environment { get; }
     internal OperationJob Job { get; } = OperationJob.Create();
-    internal ToolInventory Tools { get; set; } = new(new(@"C:\fixture\git.exe",new(1,2,3,4),"2.55.0.windows.3",true),new(@"C:\fixture\gh.exe",new(1,3,3,4),"2.100.0",true),new(@"C:\fixture\git-lfs.exe",new(1,4,3,4),"3.7.1",true),null);
+    internal ToolInventory Tools { get; set; }
     internal PreflightRunner Runner { get; }
     internal AuthService Auth { get; }
     internal SourceIntegrityAudit Audit { get; }
     internal Dictionary<string,AclDescriptor> DescriptorOverrides { get; } = new(StringComparer.OrdinalIgnoreCase);
     internal List<string> DescriptorsRead { get; } = [];
     internal IReadOnlyList<RepositoryDescriptor> Repositories = [];
-    internal string Gate = "", ApiFailure = "", MutateAt = "";
+    internal string Gate = "", ApiFailure = "", PublicGitFailure = "", RepositoryFailure = "", MutateAt = "", RuntimeFailureStage = "";
     internal bool FailOnlyDirect, InvalidHelper, HoldRuntimeUse;
     internal IDisposable? HeldRuntimeUse;
     internal GitRuntimeContext? CapturedRuntime;
     internal PreflightService? Service;
     internal Uri? SystemProxy;
+    internal Action? OnResolve;
+    internal Action<ProcessRequest>? BeforeProcess;
     internal int Discoveries, Detections, Resolutions;
     internal PreflightFixture(string? backupRoot=null,string? fixtureRoot=null)
     {
         Root=new(fixtureRoot);
+        // The scripted runner never executes Git here; use the same trusted installed
+        // executable as the real-tool tests so production can retain its identity lease.
+        string git = @"C:\Program Files\Git\cmd\git.exe";
+        Tools = new(new(git, ExecutableTrust.CaptureTrustedIdentity(git), "2.55.0.windows.3", true),
+            new(@"C:\fixture\gh.exe", new(1,3,3,4), "2.100.0", true),
+            new(@"C:\fixture\git-lfs.exe", new(1,4,3,4), "3.7.1", true), null);
         BackupRoot = backupRoot??Root.Child("backup"); AclPolicy.CreateRestrictedDirectory(BackupRoot,User); AclPolicy.CreateRestrictedDirectory(OwnerRoot,User);
         Paths = AppPaths.Create(Root.Path);
         using (AppDataPathPolicy.Acquire(Paths,Paths.AppGhConfigDirectory,AppDataEntryKind.Directory,true)) { }
@@ -600,7 +989,7 @@ internal sealed class PreflightFixture : IDisposable
     internal async Task<PreflightCheckResult> Check(CancellationToken token = default)
     {
         var probe = new NetworkProbe(Runner);
-        var proxies = new ProxyScope(probe,new Dictionary<string,string?>(), origin => { Resolutions++; return SystemProxy ?? origin; });
+        var proxies = new ProxyScope(probe,new Dictionary<string,string?>(), origin => { Resolutions++; OnResolve?.Invoke(); return SystemProxy ?? origin; });
         int enumerations = 0;
         IReadOnlyDictionary<string,string?> selectedBase = MutateAt == "authenticated-base" ? new EnumerationObservedEnvironment(Environment,() =>
         {
@@ -656,15 +1045,28 @@ internal sealed class PreflightFixture : IDisposable
         private Task<ProcessResult> RunCore(ProcessRequest request, OperationJob job, IProgress<string>? progress, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested(); Requests.Add(request); Assert.AreSame(fixture.Job,job);
+            fixture.BeforeProcess?.Invoke(request); cancellationToken.ThrowIfCancellationRequested();
             Assert.IsInstanceOfType<RuntimeEnvironment>(request.Environment);
             bool api = request.Arguments[0] == "api";
             string stage = request.Arguments.Contains("setup-git") ? "setup" : request.Arguments[0] == "config" ? "query" : request.Arguments.Contains(Repository.Url) ? "repository" : "";
+            if (stage.Length != 0 && stage == fixture.RuntimeFailureStage)
+                return Task.FromResult(new ProcessResult(1, false, false, [], ["PRIVATE_RAW_EXCEPTION"]));
             if (stage == "setup" && fixture.HoldRuntimeUse)
             {
                 fixture.CapturedRuntime = ((RuntimeEnvironment)request.Environment).Owner;
                 fixture.HeldRuntimeUse = fixture.CapturedRuntime!.AcquireRequest(job);
             }
             if (stage.Length != 0 && stage == fixture.MutateAt) File.WriteAllText(fixture.Hosts,"");
+            if (request.Arguments.Contains(NetworkProbe.PublicGitProbeUrl) && fixture.PublicGitFailure.Length != 0)
+            {
+                progress?.Report("fatal: unable to access '" + NetworkProbe.PublicGitProbeUrl + "': " + fixture.PublicGitFailure);
+                return Task.FromResult(new ProcessResult(128,false,false,[],[]));
+            }
+            if (stage == "repository" && fixture.RepositoryFailure.Length != 0 && (!fixture.FailOnlyDirect || !request.Environment.ContainsKey("HTTPS_PROXY")))
+            {
+                progress?.Report("fatal: unable to access '" + Repository.Url + "': " + fixture.RepositoryFailure);
+                return Task.FromResult(new ProcessResult(128,false,false,[],[]));
+            }
             if (api && fixture.ApiFailure.Length != 0 && (!fixture.FailOnlyDirect || !request.Environment.ContainsKey("HTTPS_PROXY")))
             { progress?.Report(fixture.ApiFailure); return Task.FromResult(new ProcessResult(1,false,false,[],[])); }
             if (request.StandardOutputFile is not null)
