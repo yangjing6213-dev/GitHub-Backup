@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-帮助把项目放在 GitHub 上的 AI 创作者，将自己账号下的项目代码、版本历史和相关资料保存到本机，集中检查备份结果。
+> **AI 帮你做出作品，别让它只留在 GitHub。** 这款 Windows 中文工具，帮你把自己账号里的项目和版本记录备份到电脑；不必先学一堆命令。
+>
+> [下载 Windows v4 预览版](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4) · [第一次使用](#六安装与快速开始) · [关于作者](#十三关于作者)
 
-用 AI 做出的项目越来越多，只留在 GitHub 上，往往很难知道自己是否还保留了一份完整的本地副本。这个工具把分散的备份步骤放进一个中文窗口，让你选择保存位置、检查环境，再查看每次备份的结果。
+如果你用 AI 做网站、工具或小程序，并把项目放在自己的 GitHub 账号里，可以用它把代码、版本历史和支持的项目资料集中保存到本机。
 
 **当前是未签名的 Windows 预览版，不是正式发布版。** v4 安装包已通过静态检查，并已在本机安装、完成备份；干净电脑运行和备份恢复尚未验证。请从 [GitHub Releases 发布页](https://github.com/yangjing6213-dev/GitHub-Backup/releases)查看实际可下载的版本、说明和校验值；较早的测试 ZIP 不含 v4 修复。不要把预览版作为重要资料的唯一备份。
 
@@ -231,6 +233,8 @@ GitHub-Backup/
 无。
 
 ## 十三、关于作者
+
+![关于作者：恩禾与联系信息](docs/assets/about-author.png)
 
 Enhe（恩禾）｜产品设计师 · 一人公司实践者 · AI Builder
 

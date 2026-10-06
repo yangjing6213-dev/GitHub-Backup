@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-A local backup app for AI creators who keep their own projects on GitHub. It helps save repository code, version history, and supported project records to your computer, then review the backup results in one place.
+> **You made something with AI. Keep a local copy, too.** This Windows app helps save your own GitHub projects and version history to your computer, without making command-line steps your starting point.
+>
+> [Download the Windows v4 preview](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4) · [Quick start](#6-installation-and-quick-start) · [About the author](#13-about-the-author)
 
-As AI makes it easier to create more projects, it can become difficult to tell whether a complete local copy exists. This tool brings the backup steps into a Windows app where you can choose a destination, check prerequisites, and review each run.
+If you use AI to build a website, tool, or small app and keep it in your own GitHub account, this app can save its code, version history, and supported project records locally.
 
 **This is an unsigned Windows preview, not a production release.** The v4 installer passed static checks and was installed on the development PC, where the user confirmed a normal backup completed. Clean-PC use and backup restoration have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions, notes, and checksums that are actually available; the older preview ZIP does not include the v4 fixes. Do not rely on a preview as the only copy of important files.
 
@@ -235,6 +237,8 @@ The [releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) 
 None.
 
 ## 13. About the author
+
+![About the author: Enhe and contact details](docs/assets/about-author.png)
 
 Enhe (恩禾) | Product Designer · Solo-company Practitioner · AI Builder
 
