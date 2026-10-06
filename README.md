@@ -1,10 +1,12 @@
 # GitHub Backup｜GitHub 备份工具
 
+[简体中文](README.md) | [English](README.en.md)
+
 帮助把项目放在 GitHub 上的 AI 创作者，将自己账号下的项目代码、版本历史和相关资料保存到本机，集中检查备份结果。
 
 用 AI 做出的项目越来越多，只留在 GitHub 上，往往很难知道自己是否还保留了一份完整的本地副本。这个工具把分散的备份步骤放进一个中文窗口，让你选择保存位置、检查环境，再查看每次备份的结果。
 
-**当前是开发中的 Windows 测试版，不是已验收的正式软件。** 单文件 `GitHubBackup.exe` 已成功生成并完成文件检查，但还没有完成真实启动、登录和备份验收；`setup.exe` 安装程序尚未完成。不要把它作为重要资料的唯一备份。
+**当前是未签名的 Windows 预览版，不是正式发布版。** 最新修复版安装程序已通过文件结构与校验值检查，但真实安装、浏览器登录和备份尚未验收。请从 [GitHub Releases 发布页](https://github.com/yangjing6213-dev/GitHub-Backup/releases)查看当前实际可下载的版本、说明和校验值；较早的测试 ZIP 不含本轮安装器修复。不要把预览版作为重要资料的唯一备份。
 
 目录：[认识项目](#一这个项目是什么) · [看输出](#二先看效果) · [适合谁](#三适合谁用) · [快速开始](#六安装与快速开始) · [日常使用](#七如何使用) · [注意事项](#十注意事项与常见问题) · [版本状态](#十一版本说明) · [关于作者](#十三关于作者)
 
@@ -96,20 +98,28 @@ D:\GitHub-Backups\<你的账号>\
 
 本地代码不要求调用付费 AI 模型。GitHub 服务、网络和存储仍取决于你自己的使用条件；本页不作永久免费或商业使用授权承诺。
 
-### 推荐路径：明确标记的测试版程序包
+### 安装包下载与安全检查
 
-1. 打开本项目的[发布页面](https://github.com/yangjing6213-dev/GitHub-Backup/releases)，先阅读该条记录的限制，再查看是否有真正的程序附件。GitHub 自动生成的 `Source code` 压缩包只是源码，不是可运行程序；没有程序附件时，说明尚未提供下载。
-2. 如果提供了 Windows x64 测试程序包，下载并解压到你新建的文件夹。文件夹中应有 `GitHubBackup.exe` 和许可说明 `NOTICE.txt`；只有前者是程序。保留许可说明。
+请从 [GitHub Releases 发布页](https://github.com/yangjing6213-dev/GitHub-Backup/releases)查看有明确版本说明的安装包和校验值。下载页可能同时保留较早测试 ZIP；它不包含本轮安装器修复。只有当发布说明明确列出新版 `GitHubBackup-setup.exe` 及对应 SHA-256 校验值时，才把它作为本轮修复版下载；找不到该文件时，不要把旧 ZIP 当作最新版，也不要拼接下载地址。
+
+安装包适用于 Windows 11 25H2 x64（系统版本 26200），请用普通用户身份运行，不要选择“以管理员身份运行”。它会固定安装到 `%LOCALAPPDATA%\Programs\GitHubBackupTool`，创建桌面和开始菜单图标，并在当前 Windows 用户的“已安装的应用”列表中登记卸载入口。卸载只移除经过核验的本程序文件和快捷方式，不会删除备份、设置、日志或凭据。
+
+如果安装时提示发现旧版本，请按提示进入安装目录运行 `Uninstall.exe`，然后重新运行新安装包。不要手动删除安装目录中的文件。安装包尚未签名，Windows 可能显示“未知发布者”；请先确认文件来源，不要关闭系统保护。
+
+### 已发布的旧测试版 ZIP（不含本轮修复）
+
+1. 阅读当前[测试版发布说明](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/build-preview-20261001)，然后下载 [Windows x64 测试版程序包（ZIP）](https://github.com/yangjing6213-dev/GitHub-Backup/releases/download/build-preview-20261001/GitHubBackup-win-x64-preview-20261001-02.zip) 和[校验值文件](https://github.com/yangjing6213-dev/GitHub-Backup/releases/download/build-preview-20261001/SHA256SUMS-preview-20261001-02.txt)。这是开发测试版，不是正式版。
+2. 将 ZIP 解压到你新建的文件夹。里面应有 `GitHubBackup.exe` 和许可说明 `NOTICE.txt`；只有前者是程序。保留许可说明。GitHub 自动生成的 `Source code` 压缩包只是源码，不是可运行程序。
 3. 双击 `GitHubBackup.exe` 后，应看到中文备份窗口。当前程序未签名，Windows 可能提示来源未验证：不要关闭安全软件或盲目忽略提示；先核对下载来源，不能确认时停止使用。
 
-这不是 `setup.exe` 安装方式；当前没有可交付的安装程序。以上窗口操作来自现有界面与代码核对，**尚未完成真实试用验收**。
+此旧 ZIP 不含本轮修复的安装程序；其中的程序仍需解压后直接运行。以上窗口操作来自现有界面与代码核对，**尚未完成真实试用验收**。
 
 ### 第一次使用的最小示例
 
 1. 在主窗口把默认作者账号 `yangjing6213-dev` 改为**你自己的 GitHub 用户名**，不是邮箱，也不是项目网址。
 2. 点击“检测与安装依赖”查看状态。**已达到最低版本的软件会显示“无需安装”；复选框只表示同意，不会自动安装。**只有确实缺少或版本过旧时，才需要勾选并点击旁边可用的“安装”按钮。程序内安装需要 winget；如果窗口说明它不可用，请先通过 [Microsoft Store 官方页面](https://apps.microsoft.com/detail/9nblggh4nns1)安装“应用安装程序”，再重新检测。之后点击“重新检查环境”。
 3. 选择备份目录，例如 `D:\GitHub-Backups`；没有 D 盘时，自己选择其他本机固定磁盘里的新文件夹。点击“验证并保存目录”，需要创建或修复权限时先阅读提示。
-4. 阅读原样保存和凭据使用提示。明确同意后点击“浏览器登录”，在 GitHub 官方页面完成登录，再重新检查环境。该登录会使用当前 Windows 用户共享的 GitHub 凭据库，可能影响其他 `gh` 工具的当前账号。
+4. 阅读原样保存和凭据使用提示。明确同意后点击“浏览器登录”，程序会尝试自动打开 GitHub 官方设备登录页；如果浏览器没有打开，请访问 `https://github.com/login/device`，并输入程序界面显示的一次性代码。完成登录后重新检查环境。该登录会使用当前 Windows 用户共享的 GitHub 凭据库，可能影响其他 `gh` 工具的当前账号。
 5. 先选择“日常备份”。环境检查通过、“开始备份”可用后点击开始。**它会处理这个账号拥有的仓库，不只处理一个示例项目。**
 6. 等待结果后，点击“打开备份目录”和“查看最近日志”。查看本次摘要，而不是仅根据文件夹已经存在判断成功。
 
@@ -125,7 +135,7 @@ dotnet build src/GitHubBackup.App/GitHubBackup.App.csproj --configuration Releas
 dotnet publish src/GitHubBackup.App/GitHubBackup.App.csproj --configuration Release --runtime win-x64 --self-contained true --no-restore --no-build -p:DebugType=None -p:DebugSymbols=false --output artifacts/publish/preview
 ```
 
-当前机器已成功执行主程序重新编译和单文件发布；没有在新电脑上完整执行上述下载、还原及试用流程。详细文件检查见 [publish/README.md](publish/README.md)。不要将未完成的安装脚本当作已经可以生成 `setup.exe` 的教程。
+当前机器已成功执行主程序重新编译和单文件发布；没有在新电脑上完整执行上述下载、还原及试用流程。详细构建说明见 [publish/README.md](publish/README.md)。普通用户不需要执行源码构建步骤。
 
 ## 七、如何使用？
 
@@ -159,7 +169,7 @@ GitHub-Backup/
 ├─ publish/
 │  ├─ README.md                      单文件构建及检查说明
 │  ├─ Verify-SingleExe.ps1            只读检查已生成的程序文件
-│  └─ Setup/                         尚未完成的安装程序构建材料、许可说明
+│  └─ Setup/                         安装程序构建脚本、保护规则与许可说明
 ├─ docs/verification/setup-installer.md 公开的开发与验收状态
 ├─ Backup-GitHubAccount.ps1           早期备份脚本
 ├─ Invoke-OneClickGitHubBackup.ps1    早期一键入口脚本
@@ -202,7 +212,7 @@ GitHub-Backup/
 
 ### 能否安装、商用或重新分发？
 
-当前安装器未完成，程序未签名且真实运行尚未验收。项目没有授予源码使用权的根级 `LICENSE`，因此不能把“源码公开”理解为已获得修改、商用或重新分发授权；需要这些授权时请联系作者。
+本项目原创源码采用 [MIT 许可证](LICENSE)：允许复制、修改、分发及商用，但分发时须保留版权和许可证声明。该许可证仅涵盖本项目原创源码，不替代第三方组件各自的许可，也不授予第三方商标或作者介绍图片的使用权。最新预览安装包未签名；在真实 Windows 账户中的安装、卸载、登录和备份仍未验收。请从 [GitHub Releases](https://github.com/yangjing6213-dev/GitHub-Backup/releases)查看具体版本和校验值。
 
 运行库和安装构建工具的第三方许可收录于 [NOTICE.txt](publish/Setup/NOTICE.txt)，它不等于本项目源码许可证。不要移除随程序提供的许可说明，也不要自行关闭安全保护来消除警告。
 
@@ -210,13 +220,11 @@ GitHub-Backup/
 
 当前桌面版为开发中的内部测试构建。文件元数据显示 `1.0.0.0`，这是程序文件版本，不是已经验收的正式 `v1.0.0` 发布。根目录 [VERSION.txt](VERSION.txt) 的 `4.0.0-one-click-isolated-ssh443` 仅对应早期脚本。
 
-已完成并有构建证据：主程序重新编译为 Windows x64 单文件 `GitHubBackup.exe`；文件格式、校验值和有限范围的内容检查通过，公开候选去除了嵌入的调试信息。依赖窗口现会标明已达标而无需安装的软件、解释 winget 不可用时安装按钮为何禁用，并给出微软商店入口。项目已有账号绑定、目录检查、两种备份模式和中文界面等代码。
+已完成并有构建证据：Windows x64 单文件主程序和本地 `GitHubBackup-setup.exe` 均已生成；安装包包含桌面与开始菜单图标、当前用户卸载登记，且静态文件验证通过。浏览器登录现会自动打开 GitHub 设备登录页，无法打开时提供手动步骤；主窗口初始位置已修正为顶部。本轮定向测试 117/117 通过。
 
-尚未验证：真实启动和退出、界面操作、干净电脑运行、真实登录及备份、最终恢复可用性。此次准备没有运行程序或完整测试，不能称为全部检查通过。
+尚未验证：在真实 Windows 用户账户中安装并卸载、Windows“已安装的应用”页面实际显示效果、真实登录及备份、干净电脑运行、最终恢复可用性。预览安装包未签名，因此不能把文件检查或模拟测试当作完整使用验收；下载前请核对 [GitHub Releases](https://github.com/yangjing6213-dev/GitHub-Backup/releases) 中的版本说明和 SHA-256。
 
-尚未完成：`setup.exe` 的安装与卸载流程。安装源码保留 `SETUP_LIFECYCLE_NOT_IMPLEMENTED` 主动阻止生成；新增安装事务日志检查仍指出未实现项，没有删除或弱化该检查。
-
-后续计划：先完成安装器与必要验收，再评估恢复及旧 Git 配置清理工具。不把计划中的功能当作已有能力。详细状态见[公开验收记录](docs/verification/setup-installer.md)，实际下载以[发布页面](https://github.com/yangjing6213-dev/GitHub-Backup/releases)为准。
+本轮更新面向普通用户的下载入口是[项目发布页](https://github.com/yangjing6213-dev/GitHub-Backup/releases)；下载前请确认所选版本的说明和校验值对应你需要的修复版。恢复及旧 Git 配置清理工具仍属于后续计划，不要将其视作现有功能。详细验收范围见[安装程序验证记录](docs/verification/setup-installer.md)。
 
 ## 十二、相关项目
 

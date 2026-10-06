@@ -2,8 +2,9 @@
 ; Task 2 ownership primitive checkpoint, NOT a complete installer or write authorization.
 ; SID/DACL and hash primitives are not a complete product-ownership decision.
 ; Receipt, mutex, occupancy and shortcut helpers remain uncomposed: HKCU binding,
-; expected uninstaller content and the complete journal/shortcut/commit transaction
-; are NOT implemented. The two-payload copy/rollback slice remains unconnected.
+; expected uninstaller content and shortcut/commit/recovery are NOT implemented.
+; The durable PREPARED/FILES_WRITTEN journal is wired only to the two-payload
+; copy/rollback slice; this still does NOT compose or authorize product install.
 ; AcquireFixedRootOwnershipLease proves only the existing fixed root and retains
 ; its handle; success is NOT ValidateOwnedLayout or permission to change files.
 ; A held path identity or an isolated primitive must NEVER authorize
@@ -78,6 +79,23 @@ Var SetupRecordedNoticeHash
 Var SetupRecordedStartMenuHash
 Var SetupRecordedDesktopHash
 Var SetupRecordedDesktop
+; Generated-file handles owned by the in-progress fresh install. These are
+; retained from creation through receipt verification or paired rollback.
+Var SetupInstallUninstallerHandle
+Var SetupInstallUninstallerIdentity
+Var SetupInstallUninstallerHash
+Var SetupInstallShortcutHandle
+Var SetupInstallShortcutIdentity
+Var SetupInstallShortcutHash
+Var SetupInstallShortcutPath
+Var SetupInstallReceiptHandle
+Var SetupInstallReceiptIdentity
+Var SetupInstallReceiptHash
+Var SetupInstallReceiptCreated
+Var SetupInstallReceiptDeletePending
+Var SetupInstallReceiptRecord
+Var SetupInstallReceiptSecurityDescriptor
+Var SetupInstallReceiptSecurityAttributes
 ; Read-only fixed-file fact check state. These slots own only handles opened by
 ; CheckFixedInstallFilesAndReceipt; GuardPathPins/GuardPathPinCount stay attached
 ; to this lease until ReleaseFixedInstallFilesAndReceipt completes.
@@ -124,6 +142,44 @@ Var SetupCopyTxnNoticeIdentity
 Var SetupCopyTxnNoticeHash
 Var SetupCopyTxnNoticeCreated
 Var SetupCopyTxnNoticeDeletePending
+; Fresh-install journal slots are transaction-owned. The state directory and
+; journal file remain open through commit or paired rollback; a cleanup failure
+; must retain the exact handle, identity and delete-pending state for retry.
+Var SetupJournalDirectoryHandle
+Var SetupJournalDirectoryIdentity
+Var SetupJournalDirectoryCreated
+Var SetupJournalDirectoryDeletePending
+Var SetupJournalFileHandle
+Var SetupJournalFileIdentity
+Var SetupJournalFileHash
+Var SetupJournalFileCreated
+Var SetupJournalFileDeletePending
+Var SetupJournalPhase
+Var SetupJournalSecurityDescriptor
+Var SetupJournalSecurityAttributes
+Var SetupJournalInfoBuffer
+Var SetupJournalRecord
+Var SetupJournalVerifyObjectHandle
+Var SetupJournalVerifyPath
+Var SetupJournalVerifyIdentity
+Var SetupJournalVerifyDirectory
+Var SetupJournalVerifyCreated
+; Read-only cross-process journal classification. These handles are opened with
+; path-identity leases and are never used as mutation or rollback authority.
+Var SetupJournalReadRootHandle
+Var SetupJournalReadRootIdentity
+Var SetupJournalReadDirectoryHandle
+Var SetupJournalReadDirectoryIdentity
+Var SetupJournalReadFileHandle
+Var SetupJournalReadFileIdentity
+Var SetupJournalReadStatus
+Var SetupJournalReadPhase
+Var SetupJournalReadBuffer
+Var SetupJournalReadSizeBuffer
+Var SetupJournalReadSize
+Var SetupJournalReadOffset
+Var SetupJournalReadLine
+Var SetupJournalReadPositionSaved
 Var SetupTxnCheckHandle
 Var SetupTxnCheckName
 Var SetupTxnCheckIdentity
@@ -232,7 +288,9 @@ Function ${PREFIX}ValidateHost
     StrCpy $9 0 ; version/GUID allocation
 
     ; NativeMachine is the OS architecture, not the x86 installer's architecture.
-    System::Call 'kernel32::IsWow64Process2(p -1, *i 0 .r0, *i 0 .r1) i.r2'
+    ; With an explicit zero source, rN is the destination; . would discard it.
+    ; Zero-initialize DWORD slots before the API writes its USHORT outputs.
+    System::Call 'kernel32::IsWow64Process2(p -1, *i 0 r0, *i 0 r1) i.r2'
     StrCmp $2 0 host_done
     StrCmp $1 ${SETUP_NATIVE_MACHINE} 0 host_done
 
@@ -255,7 +313,7 @@ Function ${PREFIX}ValidateHost
     System::Call 'advapi32::OpenProcessToken(p -1, i 8, *p .r3) i.r2'
     StrCmp $2 0 host_done
     ; TokenElevation (20) returns one DWORD. Query failure also rejects the host.
-    System::Call 'advapi32::GetTokenInformation(p r3, i 20, *i 0 .r0, i 4, *i .r4) i.r2'
+    System::Call 'advapi32::GetTokenInformation(p r3, i 20, *i 0 r0, i 4, *i .r4) i.r2'
     StrCmp $2 0 host_done
     StrCmp $4 4 0 host_done
     StrCmp $0 0 0 host_done
@@ -590,6 +648,7 @@ FunctionEnd
 Function ${PREFIX}ValidatePrivateHandleAcl
     !insertmacro SetupSaveRegisters
     Push $GuardSid
+    Push $GuardValue
     StrCpy $SetupCode 11
     StrCpy $0 0
     StrCpy $9 0
@@ -608,7 +667,8 @@ Function ${PREFIX}ValidatePrivateHandleAcl
     StrCmp $SetupCode 0 0 acl_done
     StrCpy $SetupCode 11
     ; Control is a WORD; initialize the DWORD output so high bits are zero.
-    System::Call 'advapi32::GetSecurityDescriptorControl(p r9, *i 0 .r2, *i .r3) i.r4'
+    ; System syntax is input 0 then output r2, without an extra ignored field.
+    System::Call 'advapi32::GetSecurityDescriptorControl(p r9, *i 0 r2, *i .r3) i.r4'
     StrCmp $4 0 acl_done
     IntOp $2 $2 & 0x1004 ; SE_DACL_PROTECTED | SE_DACL_PRESENT
     IntCmp $2 0x1004 0 acl_done acl_done
@@ -638,6 +698,12 @@ acl_allow:
     IntCmpU $2 16 0 acl_done 0 ; header+mask+minimum SID, before reading SID
     System::Call '*$5(i, i.r8)'
     StrCmp $8 0 acl_advance
+    ; Bound the SID's subauthority array to this ACE before IsValidSid reads it.
+    IntOp $GuardValue $5 + 9 ; SID SubAuthorityCount is ACE+8+1
+    System::Call '*$GuardValue(&i1.r8)'
+    IntOp $8 $8 * 4
+    IntOp $8 $8 + 16 ; ACE header+mask (8) plus SID header (8)
+    IntCmpU $2 $8 0 acl_done 0
     IntOp $GuardSid $5 + 8
     Call ${PREFIX}ValidateApprovedSid
     StrCmp $SetupCode 0 0 acl_done
@@ -655,6 +721,7 @@ acl_done:
         System::Free $0
     StrCmp $9 0 +2
         System::Call 'kernel32::LocalFree(p r9) p'
+    Pop $GuardValue
     Pop $GuardSid
     !insertmacro SetupRestoreRegisters
 FunctionEnd
@@ -691,7 +758,8 @@ Function ${PREFIX}ValidateSharedProgramsHandleAcl
     StrCmp $SetupCode 0 0 shared_acl_done
     StrCpy $SetupCode 11
     ; SE_DACL_PRESENT is required. Do not require SE_DACL_PROTECTED here.
-    System::Call 'advapi32::GetSecurityDescriptorControl(p r9, *i 0 .r2, *i .r3) i.r4'
+    ; System syntax is input 0 then output r2, without an extra ignored field.
+    System::Call 'advapi32::GetSecurityDescriptorControl(p r9, *i 0 r2, *i .r3) i.r4'
     StrCmp $4 0 shared_acl_done
     IntOp $2 $2 & 0x4
     StrCmp $2 0 shared_acl_done
@@ -987,16 +1055,12 @@ Function ${PREFIX}ReadOwnedReceipt
     !insertmacro SetupReceiptLiteral "${PREFIX}" "startMenu=1"
     !insertmacro SetupReceiptField "${PREFIX}" "desktop" $SetupRecordedDesktop
     StrCmp $SetupRecordedDesktop 0 receipt_desktop_valid
-    StrCmp $SetupRecordedDesktop 1 0 receipt_done
+    Goto receipt_done
 receipt_desktop_valid:
     !insertmacro SetupReceiptField "${PREFIX}" "startMenuSha256" $SetupRecordedStartMenuHash
     !insertmacro SetupReceiptHash "${PREFIX}" $SetupRecordedStartMenuHash 64
     !insertmacro SetupReceiptField "${PREFIX}" "desktopSha256" $SetupRecordedDesktopHash
-    ${If} $SetupRecordedDesktop == 1
-        !insertmacro SetupReceiptHash "${PREFIX}" $SetupRecordedDesktopHash 64
-    ${Else}
-        StrCmp $SetupRecordedDesktopHash "none" 0 receipt_done
-    ${EndIf}
+    StrCmp $SetupRecordedDesktopHash "none" 0 receipt_done
     StrCmp $GuardRecordOffset $GuardRecordSize 0 receipt_done
     ; First product release has no approved previous installations. A future
     ; reviewed predecessor table must be embedded, never learned from this file.
@@ -1273,6 +1337,8 @@ Function ${PREFIX}PinExistingInstallAncestors
     Push $GuardIdentity
     Push $GuardHash
     Push $GuardLastError
+    Push $GuardValue
+    Push $GuardValueLength
     StrCpy $SetupCode 11
     StrCpy $GuardProgramsParentPinned 0
     StrCmp $GuardPathPins 0 pins_allocate
@@ -1340,6 +1406,8 @@ pins_error:
     Call ${PREFIX}ReleasePathPins
     StrCpy $SetupCode 11
 pins_done:
+    Pop $GuardValueLength
+    Pop $GuardValue
     Pop $GuardLastError
     Pop $GuardHash
     Pop $GuardIdentity
@@ -1447,6 +1515,34 @@ fresh_scratch_descriptor:
 fresh_scratch_descriptor_freed:
     StrCpy $SetupFreshRootSecurityDescriptor 0
 fresh_scratch_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Retry only local allocations left behind by a failed journal preparation.
+; A failed LocalFree keeps its pointer so a later paired-release attempt can retry.
+Function ${PREFIX}ReleaseFreshInstallJournalScratch
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 0
+    StrCpy $SetupJournalRecord ""
+    StrCmp $SetupJournalInfoBuffer "" journal_scratch_attributes
+    StrCmp $SetupJournalInfoBuffer 0 journal_scratch_attributes
+    System::Free $SetupJournalInfoBuffer
+    StrCpy $SetupJournalInfoBuffer 0
+journal_scratch_attributes:
+    StrCmp $SetupJournalSecurityAttributes "" journal_scratch_descriptor
+    StrCmp $SetupJournalSecurityAttributes 0 journal_scratch_descriptor
+    System::Free $SetupJournalSecurityAttributes
+    StrCpy $SetupJournalSecurityAttributes 0
+journal_scratch_descriptor:
+    StrCmp $SetupJournalSecurityDescriptor "" journal_scratch_done
+    StrCmp $SetupJournalSecurityDescriptor 0 journal_scratch_done
+    System::Call 'kernel32::LocalFree(p $SetupJournalSecurityDescriptor) p.r0'
+    StrCmp $0 0 journal_scratch_descriptor_freed
+    StrCpy $SetupCode 13
+    Goto journal_scratch_done
+journal_scratch_descriptor_freed:
+    StrCpy $SetupJournalSecurityDescriptor 0
+journal_scratch_done:
     !insertmacro SetupRestoreRegisters
 FunctionEnd
 
@@ -1948,9 +2044,9 @@ programs_parent_missing:
     StrCmp $1 0 programs_parent_refuse
     System::Call 'kernel32::GetProcAddress(p r1, m "CreateDirectory2W") p.r2'
     StrCmp $2 0 programs_parent_refuse
-    ; FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL; share read
+    ; FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE; share read
     ; only (no write/delete opens); DISALLOW_PATH_REDIRECTS; inherit normal ACL.
-    System::Call '::$2(w "$SetupLocalAppData\Programs", i 0x20081, i 1, i 1, p 0) p.r0 ?e'
+    System::Call '::$2(w "$SetupLocalAppData\Programs", i 0x120081, i 1, i 1, p 0) p.r0 ?e'
     Pop $GuardLastError
     ; The current API page says NULL on failure but its example uses
     ; INVALID_HANDLE_VALUE. Treat either sentinel as failure; never adopt a
@@ -2070,9 +2166,9 @@ fresh_root_pin_capacity_ok:
     StrCmp $1 0 fresh_root_create_refused
     System::Call 'kernel32::GetProcAddress(p r1, m "CreateDirectory2W") p.r2'
     StrCmp $2 0 fresh_root_create_refused
-    ; FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL; share read;
+    ; FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE; share read;
     ; DISALLOW_PATH_REDIRECTS; apply the protected current-user DACL at creation.
-    System::Call '::$2(w "$SetupFixedRoot", i 0x20081, i 1, i 1, p $SetupFreshRootSecurityAttributes) p.r0 ?e'
+    System::Call '::$2(w "$SetupFixedRoot", i 0x120081, i 1, i 1, p $SetupFreshRootSecurityAttributes) p.r0 ?e'
     Pop $GuardLastError
     StrCmp $0 0 fresh_root_create_refused
     StrCmp $0 -1 fresh_root_create_refused
@@ -2410,7 +2506,7 @@ copy_source_opened:
     System::Call 'kernel32::GetFinalPathNameByHandleW(p $SetupCopyTargetHandle, w .r1, i ${NSIS_MAX_STRLEN}, i 0) i.r2'
     StrCmp $2 0 copy_failure
     IntCmpU $2 ${NSIS_MAX_STRLEN} copy_failure 0 copy_failure
-    StrCmp $1 "\\?\$SetupFixedRoot\\$SetupCopyStagingName" 0 copy_failure
+    StrCmp $1 "\\?\$SetupFixedRoot\$SetupCopyStagingName" 0 copy_failure
     StrCpy $GuardHandle $SetupCopyTargetHandle
     Call ${PREFIX}ValidatePrivateHandleAcl
     StrCmp $SetupCode 0 0 copy_failure
@@ -2593,6 +2689,926 @@ copy_done:
     !insertmacro SetupRestoreRegisters
 FunctionEnd
 
+; Inspect exactly the retained handle named by SetupJournalVerifyObjectHandle.
+; An empty identity may be captured only for a slot whose CREATE_NEW creator
+; returned this same still-open handle and recorded Created=1.
+Function ${PREFIX}ValidateFreshInstallJournalHandle
+    !insertmacro SetupSaveRegisters
+    Push $GuardHandle
+    Push $GuardPath
+    Push $GuardDirectory
+    Push $GuardIdentity
+    Push $GuardHash
+    Push $GuardLastError
+    StrCpy $SetupCode 13
+    StrCpy $9 0 ; locally allocated file-information buffer
+    StrCmp $SetupJournalVerifyObjectHandle "" journal_handle_done
+    StrCmp $SetupJournalVerifyObjectHandle 0 journal_handle_done
+    StrCmp $SetupJournalVerifyObjectHandle -1 journal_handle_done
+    StrCmp $SetupJournalVerifyPath "" journal_handle_done
+    StrCmp $SetupJournalVerifyDirectory 0 journal_handle_kind_ok
+    StrCmp $SetupJournalVerifyDirectory 1 0 journal_handle_done
+journal_handle_kind_ok:
+    StrCmp $SetupJournalInfoBuffer "" journal_handle_allocate
+    StrCmp $SetupJournalInfoBuffer 0 journal_handle_allocate
+    StrCpy $0 $SetupJournalInfoBuffer
+    Goto journal_handle_info_ready
+journal_handle_allocate:
+    System::Alloc 52 ; BY_HANDLE_FILE_INFORMATION / FILE_ID_INFO
+    Pop $0
+    StrCmp $0 0 journal_handle_done
+    StrCpy $9 1
+journal_handle_info_ready:
+    System::Call 'kernel32::GetFileInformationByHandle(p $SetupJournalVerifyObjectHandle, p r0) i.r1'
+    StrCmp $1 0 journal_handle_done
+    System::Call '*$0(i.r1, i, i, i, i, i, i, i, i, i, i.r5, i, i)'
+    IntOp $2 $1 & 0x400 ; reject reparse points on the exact returned handle
+    StrCmp $2 0 0 journal_handle_done
+    IntOp $2 $1 & 0x10
+    ${If} $SetupJournalVerifyDirectory == 1
+        StrCmp $2 0 journal_handle_done
+    ${Else}
+        StrCmp $2 0 0 journal_handle_done
+        StrCmp $5 1 0 journal_handle_done ; journal file has exactly one hard link
+    ${EndIf}
+    System::Call 'kernel32::GetFinalPathNameByHandleW(p $SetupJournalVerifyObjectHandle, w .r1, i ${NSIS_MAX_STRLEN}, i 0) i.r2'
+    StrCmp $2 0 journal_handle_done
+    IntCmpU $2 ${NSIS_MAX_STRLEN} journal_handle_done 0 journal_handle_done
+    StrCmp $1 $SetupJournalVerifyPath 0 journal_handle_done
+    ; FILE_ID_INFO: preserve all 24 bytes from this same handle.
+    System::Call 'kernel32::GetFileInformationByHandleEx(p $SetupJournalVerifyObjectHandle, i 18, p r0, i 24) i.r1'
+    StrCmp $1 0 journal_handle_done
+    System::Call '*$0(i.r3, i.r4, i.r5, i.r6, i.r7, i.r8)'
+    StrCpy $GuardIdentity "$3:$4:$5:$6:$7:$8"
+    StrCmp $SetupJournalVerifyIdentity "" journal_handle_capture_identity
+    StrCmp $GuardIdentity $SetupJournalVerifyIdentity 0 journal_handle_done
+    Goto journal_handle_acl
+journal_handle_capture_identity:
+    StrCmp $SetupJournalVerifyCreated 1 0 journal_handle_done
+    StrCpy $SetupJournalVerifyIdentity $GuardIdentity
+journal_handle_acl:
+    StrCpy $GuardHandle $SetupJournalVerifyObjectHandle
+    StrCpy $GuardDirectory $SetupJournalVerifyDirectory
+    Call ${PREFIX}ValidatePrivateHandleAcl
+    StrCmp $SetupCode 0 0 journal_handle_done
+    StrCpy $SetupCode 0
+journal_handle_done:
+    StrCmp $9 1 0 journal_handle_restore
+    System::Free $0
+journal_handle_restore:
+    Pop $GuardLastError
+    Pop $GuardHash
+    Pop $GuardIdentity
+    Pop $GuardDirectory
+    Pop $GuardPath
+    Pop $GuardHandle
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+Function ${PREFIX}ValidateFreshInstallJournalRoot
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupCopyTransactionActive 1 journal_root_active
+    Goto journal_root_done
+journal_root_active:
+    StrCmp $SetupCopyRootHandle "" journal_root_done
+    StrCmp $SetupCopyRootHandle 0 journal_root_done
+    StrCmp $SetupCopyRootIdentity "" journal_root_done
+    StrCmp $SetupCopyRootLeasePending 0 journal_root_lease_ready
+    Goto journal_root_done
+journal_root_lease_ready:
+    StrCmp $GuardPathPins "" journal_root_done
+    StrCmp $GuardPathPins 0 journal_root_done
+    StrCmp $GuardPathPinCount 0 journal_root_done
+    StrCpy $SetupJournalVerifyObjectHandle $SetupCopyRootHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot"
+    StrCpy $SetupJournalVerifyIdentity $SetupCopyRootIdentity
+    StrCpy $SetupJournalVerifyDirectory 1
+    StrCpy $SetupJournalVerifyCreated 0
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 journal_root_done
+journal_root_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+Function ${PREFIX}ValidateFreshInstallJournalDirectory
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupJournalDirectoryCreated 1 journal_dir_created
+    Goto journal_dir_done
+journal_dir_created:
+    StrCmp $SetupJournalDirectoryHandle "" journal_dir_done
+    StrCmp $SetupJournalDirectoryHandle 0 journal_dir_done
+    Call ${PREFIX}ValidateFreshInstallJournalRoot
+    StrCmp $SetupCode 0 journal_dir_root_ready
+    Goto journal_dir_done
+journal_dir_root_ready:
+    StrCpy $SetupJournalVerifyObjectHandle $SetupJournalDirectoryHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot\.GitHubBackupTool.state"
+    StrCpy $SetupJournalVerifyIdentity $SetupJournalDirectoryIdentity
+    StrCpy $SetupJournalVerifyDirectory 1
+    StrCpy $SetupJournalVerifyCreated $SetupJournalDirectoryCreated
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 journal_dir_capture
+    Goto journal_dir_done
+journal_dir_capture:
+    StrCpy $SetupJournalDirectoryIdentity $SetupJournalVerifyIdentity
+    StrCpy $SetupCode 0
+journal_dir_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+Function ${PREFIX}ValidateFreshInstallJournalFile
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupJournalFileCreated 1 journal_file_created
+    Goto journal_file_done
+journal_file_created:
+    StrCmp $SetupJournalFileHandle "" journal_file_done
+    StrCmp $SetupJournalFileHandle 0 journal_file_done
+    Call ${PREFIX}ValidateFreshInstallJournalDirectory
+    StrCmp $SetupCode 0 journal_file_parent_ready
+    Goto journal_file_done
+journal_file_parent_ready:
+    StrCpy $SetupJournalVerifyObjectHandle $SetupJournalFileHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot\.GitHubBackupTool.state\journal.ini"
+    StrCpy $SetupJournalVerifyIdentity $SetupJournalFileIdentity
+    StrCpy $SetupJournalVerifyDirectory 0
+    StrCpy $SetupJournalVerifyCreated $SetupJournalFileCreated
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 journal_file_capture
+    Goto journal_file_done
+journal_file_capture:
+    StrCpy $SetupJournalFileIdentity $SetupJournalVerifyIdentity
+    StrCpy $SetupCode 0
+journal_file_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Read one bounded ASCII line from the same retained UTF-16LE journal handle.
+; Lines must be nonempty, printable ASCII and terminated by canonical CRLF.
+Function ${PREFIX}ReadFreshInstallJournalLine
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalReadLine ""
+    StrCmp $SetupJournalReadBuffer 0 journal_read_line_done
+    StrCpy $3 0
+journal_read_line_next:
+    IntCmpU $SetupJournalReadOffset $SetupJournalReadSize journal_read_line_done journal_read_line_has_data journal_read_line_done
+journal_read_line_has_data:
+    IntOp $0 $SetupJournalReadBuffer + $SetupJournalReadOffset
+    System::Call '*$0(&i2.r1)'
+    IntOp $SetupJournalReadOffset $SetupJournalReadOffset + 2
+    StrCmp $1 13 journal_read_line_cr
+    IntCmpU $1 32 journal_read_line_ascii_min journal_read_line_done journal_read_line_ascii_min
+journal_read_line_ascii_min:
+    IntCmpU $1 126 journal_read_line_append journal_read_line_append journal_read_line_done
+journal_read_line_append:
+    IntOp $3 $3 + 1
+    IntCmpU $3 ${NSIS_MAX_STRLEN} journal_read_line_done 0 journal_read_line_done
+    IntFmt $2 "%c" $1
+    StrCpy $SetupJournalReadLine "$SetupJournalReadLine$2"
+    Goto journal_read_line_next
+journal_read_line_cr:
+    IntCmpU $3 0 journal_read_line_done journal_read_line_done journal_read_line_has_lf
+journal_read_line_has_lf:
+    IntCmpU $SetupJournalReadOffset $SetupJournalReadSize journal_read_line_done journal_read_line_lf_available journal_read_line_done
+journal_read_line_lf_available:
+    IntOp $0 $SetupJournalReadBuffer + $SetupJournalReadOffset
+    System::Call '*$0(&i2.r1)'
+    StrCmp $1 10 0 journal_read_line_done
+    IntOp $SetupJournalReadOffset $SetupJournalReadOffset + 2
+    StrCpy $SetupCode 0
+journal_read_line_done:
+    ${If} $SetupCode != 0
+        StrCpy $SetupJournalReadLine ""
+    ${EndIf}
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Compare the next canonical journal line with GuardValue. A mismatch leaves a
+; nonzero status; no INI APIs or path fields are interpreted.
+Function ${PREFIX}RequireFreshInstallJournalLine
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    Call ${PREFIX}ReadFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_require_line_read
+    Goto journal_require_line_done
+journal_require_line_read:
+    StrCpy $SetupCode 13
+    StrCmp $SetupJournalReadLine $GuardValue 0 journal_require_line_done
+    StrCpy $SetupCode 0
+journal_require_line_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Parse only the already opened journal handle. Exact ordered fields reject
+; duplicates, omissions, extra data and unknown phases. The payload hashes and
+; SID are claims checked against the caller's independently derived contract;
+; PARSED is syntax/classification only, never install ownership or recovery authority.
+Function ${PREFIX}ReadFreshInstallJournalRecord
+    !insertmacro SetupSaveRegisters
+    Push $GuardValue
+    Push $SetupJournalReadSizeBuffer
+    Push $SetupJournalReadBuffer
+    Push $SetupJournalReadSize
+    Push $SetupJournalReadOffset
+    Push $SetupJournalReadLine
+    Push $SetupJournalReadPositionSaved
+    Push $R8
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalReadPhase ""
+    StrCmp $SetupJournalReadSizeBuffer "" journal_record_size_slot_empty
+    StrCmp $SetupJournalReadSizeBuffer 0 journal_record_size_slot_empty
+    Goto journal_record_done
+journal_record_size_slot_empty:
+    StrCmp $SetupJournalReadBuffer "" journal_record_buffer_slot_empty
+    StrCmp $SetupJournalReadBuffer 0 journal_record_buffer_slot_empty
+    Goto journal_record_done
+journal_record_buffer_slot_empty:
+    StrCpy $SetupJournalReadSizeBuffer 0
+    StrCpy $SetupJournalReadBuffer 0
+    StrCpy $SetupJournalReadPositionSaved 0
+    StrCmp $SetupJournalReadFileHandle 0 journal_record_done
+    StrCmp $SetupJournalReadFileHandle -1 journal_record_done
+    System::Alloc 8
+    Pop $SetupJournalReadSizeBuffer
+    StrCmp $SetupJournalReadSizeBuffer 0 journal_record_done
+    System::Call 'kernel32::GetFileSizeEx(p $SetupJournalReadFileHandle, p $SetupJournalReadSizeBuffer) i.r2'
+    StrCmp $2 0 journal_record_done
+    System::Call '*$SetupJournalReadSizeBuffer(i.r0, i.r1)'
+    StrCmp $1 0 0 journal_record_done
+    IntCmpU $0 4 journal_record_size_minimum_ok journal_record_done journal_record_size_minimum_ok
+journal_record_size_minimum_ok:
+    IntCmpU $0 4096 journal_record_size_bounded journal_record_size_bounded journal_record_done
+journal_record_size_bounded:
+    IntOp $1 $0 & 1
+    StrCmp $1 0 0 journal_record_done
+    StrCpy $SetupJournalReadSize $0
+    System::Alloc 4096
+    Pop $SetupJournalReadBuffer
+    StrCmp $SetupJournalReadBuffer 0 journal_record_done
+    System::Call 'kernel32::SetFilePointerEx(p $SetupJournalReadFileHandle, l 0, *l .r8, i 1) i.r2'
+    StrCmp $2 0 journal_record_done
+    StrCpy $SetupJournalReadPositionSaved 1
+    System::Call 'kernel32::SetFilePointerEx(p $SetupJournalReadFileHandle, l 0, p 0, i 0) i.r2'
+    StrCmp $2 0 journal_record_done
+    System::Call 'kernel32::ReadFile(p $SetupJournalReadFileHandle, p $SetupJournalReadBuffer, i $SetupJournalReadSize, *i .r1, p 0) i.r2'
+    StrCmp $2 0 journal_record_done
+    StrCmp $1 $SetupJournalReadSize 0 journal_record_done
+    System::Call '*$SetupJournalReadBuffer(&i2.r1)'
+    IntCmpU $1 0xFEFF journal_record_bom_valid journal_record_done journal_record_done
+journal_record_bom_valid:
+    StrCpy $SetupJournalReadOffset 2
+
+    StrCpy $GuardValue "[GitHubBackupSetupJournal]"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_schema
+    Goto journal_record_done
+journal_record_schema:
+    StrCpy $GuardValue "schema=1"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_product
+    Goto journal_record_done
+journal_record_product:
+    StrCpy $GuardValue "productId=${SETUP_PRODUCT_ID}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_sid
+    Goto journal_record_done
+journal_record_sid:
+    StrCpy $GuardValue "ownerSid=$SetupOwnerSid"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_version
+    Goto journal_record_done
+journal_record_version:
+    StrCpy $GuardValue "appVersion=${SETUP_APP_VERSION}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_source
+    Goto journal_record_done
+journal_record_source:
+    StrCpy $GuardValue "sourceCommit=${SETUP_SOURCE_COMMIT}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_payload_hash
+    Goto journal_record_done
+journal_record_payload_hash:
+    StrCpy $GuardValue "payloadSha256=${SETUP_APP_SHA256}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_app_hash
+    Goto journal_record_done
+journal_record_app_hash:
+    StrCpy $GuardValue "${SETUP_APP_NAME}=${SETUP_APP_SHA256}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_notice_hash
+    Goto journal_record_done
+journal_record_notice_hash:
+    StrCpy $GuardValue "${SETUP_NOTICE_NAME}=${SETUP_NOTICE_SHA256}"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_prepared_phase
+    Goto journal_record_done
+journal_record_prepared_phase:
+    StrCpy $GuardValue "phase=PREPARED"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_phase_choice
+    Goto journal_record_done
+journal_record_phase_choice:
+    StrCmp $SetupJournalReadOffset $SetupJournalReadSize journal_record_prepared
+    StrCpy $GuardValue "phase=FILES_WRITTEN"
+    Call ${PREFIX}RequireFreshInstallJournalLine
+    StrCmp $SetupCode 0 journal_record_files_written
+    Goto journal_record_done
+journal_record_files_written:
+    StrCmp $SetupJournalReadOffset $SetupJournalReadSize journal_record_files_written_valid
+    Goto journal_record_done
+journal_record_files_written_valid:
+    StrCpy $SetupJournalReadPhase "FILES_WRITTEN"
+    StrCpy $SetupCode 0
+    Goto journal_record_done
+journal_record_prepared:
+    StrCpy $SetupJournalReadPhase "PREPARED"
+    StrCpy $SetupCode 0
+journal_record_done:
+    StrCmp $SetupJournalReadPositionSaved 1 journal_record_restore_position
+    Goto journal_record_free_buffers
+journal_record_restore_position:
+    System::Call 'kernel32::SetFilePointerEx(p $SetupJournalReadFileHandle, l r8, p 0, i 0) i.r2'
+    StrCmp $2 0 journal_record_restore_failed
+    Goto journal_record_free_buffers
+journal_record_restore_failed:
+    StrCpy $SetupCode 13
+journal_record_free_buffers:
+    StrCmp $SetupJournalReadBuffer 0 journal_record_free_size
+    System::Free $SetupJournalReadBuffer
+    StrCpy $SetupJournalReadBuffer 0
+journal_record_free_size:
+    StrCmp $SetupJournalReadSizeBuffer 0 journal_record_clear_phase
+    System::Free $SetupJournalReadSizeBuffer
+    StrCpy $SetupJournalReadSizeBuffer 0
+journal_record_clear_phase:
+    StrCmp $SetupCode 0 journal_record_restore_scratch
+    StrCpy $SetupJournalReadPhase ""
+journal_record_restore_scratch:
+    Pop $R8
+    Pop $SetupJournalReadPositionSaved
+    Pop $SetupJournalReadLine
+    Pop $SetupJournalReadOffset
+    Pop $SetupJournalReadSize
+    Pop $SetupJournalReadBuffer
+    Pop $SetupJournalReadSizeBuffer
+    Pop $GuardValue
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Read-only classification of an existing journal. The caller must first bind
+; SetupFixedRoot/SetupLocalAppData from ValidateHost and retain the ancestor
+; pins from PinExistingInstallAncestors; this helper independently checks the
+; expected Programs relationship, opens each exact fixed path with no-delete
+; sharing, validates private ACLs and reads only the held single-link file.
+; A PARSED result never authorizes cleanup, rollback, resume, overwrite or uninstall.
+Function ${PREFIX}InspectFreshInstallJournal
+    !insertmacro SetupSaveRegisters
+    Push $GuardPath
+    Push $GuardDirectory
+    Push $GuardHandle
+    Push $GuardIdentity
+    Push $GuardHash
+    Push $GuardLastError
+    Push $GuardSid
+    Push $GuardValue
+    Push $GuardValueLength
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalReadStatus "REJECTED"
+    StrCpy $SetupJournalReadPhase ""
+    StrCmp $SetupMode "install" journal_inspect_mode_valid
+    StrCmp $SetupMode "uninstall" 0 journal_inspect_done
+journal_inspect_mode_valid:
+    StrCmp $SetupOwnerSid "" journal_inspect_done
+    StrCmp $SetupLocalAppData "" journal_inspect_done
+    StrCmp $SetupFixedRoot "$SetupLocalAppData\${SETUP_INSTALL_SUFFIX}" 0 journal_inspect_done
+    StrCmp $GuardProgramsParentPinned 1 0 journal_inspect_done
+    StrCmp $GuardPathPins "" journal_inspect_done
+    StrCmp $GuardPathPins 0 journal_inspect_done
+    StrCmp $GuardPathPinCount 0 journal_inspect_done
+    StrCmp $SetupJournalReadRootHandle "" journal_inspect_slots_root_empty
+    StrCmp $SetupJournalReadRootHandle 0 journal_inspect_slots_root_empty
+    Goto journal_inspect_done
+journal_inspect_slots_root_empty:
+    StrCmp $SetupJournalReadDirectoryHandle "" journal_inspect_slots_directory_empty
+    StrCmp $SetupJournalReadDirectoryHandle 0 journal_inspect_slots_directory_empty
+    Goto journal_inspect_done
+journal_inspect_slots_directory_empty:
+    StrCmp $SetupJournalReadFileHandle "" journal_inspect_slots_file_empty
+    StrCmp $SetupJournalReadFileHandle 0 journal_inspect_slots_file_empty
+    Goto journal_inspect_done
+journal_inspect_slots_file_empty:
+    StrCpy $GuardPath $SetupFixedRoot
+    StrCpy $GuardDirectory 1
+    Call ${PREFIX}OpenPathIdentityLease
+    StrCmp $GuardHandle 0 journal_inspect_root_opened
+    StrCpy $SetupJournalReadRootHandle $GuardHandle
+    StrCpy $SetupJournalReadRootIdentity $GuardIdentity
+    StrCmp $SetupCode 0 journal_inspect_root_opened
+    Goto journal_inspect_close
+journal_inspect_root_opened:
+    StrCmp $SetupCode 0 journal_inspect_root_open
+    Goto journal_inspect_close
+journal_inspect_root_open:
+    StrCpy $SetupJournalReadRootHandle $GuardHandle
+    StrCpy $SetupJournalReadRootIdentity $GuardIdentity
+    StrCpy $SetupCode 13
+    StrCpy $GuardHandle $SetupJournalReadRootHandle
+    StrCpy $GuardDirectory 1
+    Call ${PREFIX}ValidatePrivateHandleAcl
+    StrCmp $SetupCode 0 journal_inspect_root_acl
+    Goto journal_inspect_close
+journal_inspect_root_acl:
+    StrCpy $SetupCode 13
+    StrCpy $GuardPath "$SetupFixedRoot\.GitHubBackupTool.state"
+    StrCpy $GuardDirectory 1
+    Call ${PREFIX}OpenPathIdentityLease
+    StrCmp $GuardHandle 0 journal_inspect_directory_opened
+    StrCpy $SetupJournalReadDirectoryHandle $GuardHandle
+    StrCpy $SetupJournalReadDirectoryIdentity $GuardIdentity
+    StrCmp $SetupCode 0 journal_inspect_directory_opened
+    Goto journal_inspect_close
+journal_inspect_directory_opened:
+    StrCmp $SetupCode 0 journal_inspect_directory_open
+    Goto journal_inspect_close
+journal_inspect_directory_open:
+    StrCpy $SetupJournalReadDirectoryHandle $GuardHandle
+    StrCpy $SetupJournalReadDirectoryIdentity $GuardIdentity
+    StrCpy $SetupCode 13
+    StrCpy $GuardHandle $SetupJournalReadDirectoryHandle
+    StrCpy $GuardDirectory 1
+    Call ${PREFIX}ValidatePrivateHandleAcl
+    StrCmp $SetupCode 0 journal_inspect_directory_acl
+    Goto journal_inspect_close
+journal_inspect_directory_acl:
+    StrCpy $SetupCode 13
+    StrCpy $GuardPath "$SetupFixedRoot\.GitHubBackupTool.state\journal.ini"
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}OpenPathIdentityLease
+    StrCmp $GuardHandle 0 journal_inspect_file_opened
+    StrCpy $SetupJournalReadFileHandle $GuardHandle
+    StrCpy $SetupJournalReadFileIdentity $GuardIdentity
+    StrCmp $SetupCode 0 journal_inspect_file_opened
+    Goto journal_inspect_close
+journal_inspect_file_opened:
+    StrCmp $SetupCode 0 journal_inspect_file_open
+    Goto journal_inspect_close
+journal_inspect_file_open:
+    StrCpy $SetupJournalReadFileHandle $GuardHandle
+    StrCpy $SetupJournalReadFileIdentity $GuardIdentity
+    StrCpy $SetupCode 13
+    StrCpy $GuardHandle $SetupJournalReadFileHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}ValidatePrivateHandleAcl
+    StrCmp $SetupCode 0 journal_inspect_file_acl
+    Goto journal_inspect_close
+journal_inspect_file_acl:
+    StrCpy $SetupCode 13
+    Call ${PREFIX}ReadFreshInstallJournalRecord
+    StrCmp $SetupCode 0 journal_inspect_parse_ok
+    Goto journal_inspect_close
+journal_inspect_parse_ok:
+journal_inspect_close:
+    StrCmp $SetupJournalReadFileHandle 0 journal_inspect_close_directory
+    System::Call 'kernel32::CloseHandle(p $SetupJournalReadFileHandle) i.r0'
+    StrCmp $0 0 journal_inspect_close_file_failed
+    StrCpy $SetupJournalReadFileHandle 0
+    StrCpy $SetupJournalReadFileIdentity ""
+    Goto journal_inspect_close_directory
+journal_inspect_close_file_failed:
+    StrCpy $SetupCode 13
+journal_inspect_close_directory:
+    StrCmp $SetupJournalReadDirectoryHandle 0 journal_inspect_close_root
+    System::Call 'kernel32::CloseHandle(p $SetupJournalReadDirectoryHandle) i.r0'
+    StrCmp $0 0 journal_inspect_close_directory_failed
+    StrCpy $SetupJournalReadDirectoryHandle 0
+    StrCpy $SetupJournalReadDirectoryIdentity ""
+    Goto journal_inspect_close_root
+journal_inspect_close_directory_failed:
+    StrCpy $SetupCode 13
+journal_inspect_close_root:
+    StrCmp $SetupJournalReadRootHandle 0 journal_inspect_result
+    System::Call 'kernel32::CloseHandle(p $SetupJournalReadRootHandle) i.r0'
+    StrCmp $0 0 journal_inspect_close_root_failed
+    StrCpy $SetupJournalReadRootHandle 0
+    StrCpy $SetupJournalReadRootIdentity ""
+    Goto journal_inspect_result
+journal_inspect_close_root_failed:
+    StrCpy $SetupCode 13
+journal_inspect_result:
+    StrCmp $SetupCode 0 journal_inspect_parsed
+    StrCpy $SetupJournalReadStatus "REJECTED"
+    StrCpy $SetupJournalReadPhase ""
+    Goto journal_inspect_done
+journal_inspect_parsed:
+    StrCpy $SetupJournalReadStatus "PARSED"
+journal_inspect_done:
+    Pop $GuardValueLength
+    Pop $GuardValue
+    Pop $GuardSid
+    Pop $GuardLastError
+    Pop $GuardHash
+    Pop $GuardIdentity
+    Pop $GuardHandle
+    Pop $GuardDirectory
+    Pop $GuardPath
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Prepare the durable PREPARED record before either payload file is created.
+; The state folder and journal are both CREATE_NEW objects with protected ACLs;
+; only their original returned handles are retained or ever used for cleanup.
+Function ${PREFIX}PrepareFreshInstallJournal
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupMode "install" journal_prepare_mode_ok
+    Goto journal_prepare_done
+journal_prepare_mode_ok:
+    StrCmp $SetupJournalDirectoryCreated "" journal_prepare_dir_created_empty
+    StrCmp $SetupJournalDirectoryCreated 0 journal_prepare_dir_created_empty
+    Goto journal_prepare_done
+journal_prepare_dir_created_empty:
+    StrCmp $SetupJournalFileCreated "" journal_prepare_file_created_empty
+    StrCmp $SetupJournalFileCreated 0 journal_prepare_file_created_empty
+    Goto journal_prepare_done
+journal_prepare_file_created_empty:
+    StrCmp $SetupJournalDirectoryHandle "" journal_prepare_dir_handle_empty
+    StrCmp $SetupJournalDirectoryHandle 0 journal_prepare_dir_handle_empty
+    Goto journal_prepare_done
+journal_prepare_dir_handle_empty:
+    StrCmp $SetupJournalFileHandle "" journal_prepare_file_handle_empty
+    StrCmp $SetupJournalFileHandle 0 journal_prepare_file_handle_empty
+    Goto journal_prepare_done
+journal_prepare_file_handle_empty:
+    StrCmp $SetupJournalDirectoryIdentity "" journal_prepare_dir_identity_empty
+    Goto journal_prepare_done
+journal_prepare_dir_identity_empty:
+    StrCmp $SetupJournalFileIdentity "" journal_prepare_file_identity_empty
+    Goto journal_prepare_done
+journal_prepare_file_identity_empty:
+    StrCmp $SetupJournalDirectoryDeletePending "" journal_prepare_dir_pending_empty
+    StrCmp $SetupJournalDirectoryDeletePending 0 journal_prepare_dir_pending_empty
+    Goto journal_prepare_done
+journal_prepare_dir_pending_empty:
+    StrCmp $SetupJournalFileDeletePending "" journal_prepare_file_pending_empty
+    StrCmp $SetupJournalFileDeletePending 0 journal_prepare_file_pending_empty
+    Goto journal_prepare_done
+journal_prepare_file_pending_empty:
+    StrCmp $SetupJournalFileHash "" journal_prepare_hash_empty
+    Goto journal_prepare_done
+journal_prepare_hash_empty:
+    StrCmp $SetupJournalPhase "" journal_prepare_phase_empty
+    Goto journal_prepare_done
+journal_prepare_phase_empty:
+    StrCmp $SetupJournalSecurityDescriptor "" journal_prepare_descriptor_empty
+    StrCmp $SetupJournalSecurityDescriptor 0 journal_prepare_descriptor_empty
+    Goto journal_prepare_done
+journal_prepare_descriptor_empty:
+    StrCmp $SetupJournalSecurityAttributes "" journal_prepare_attributes_empty
+    StrCmp $SetupJournalSecurityAttributes 0 journal_prepare_attributes_empty
+    Goto journal_prepare_done
+journal_prepare_attributes_empty:
+    StrCmp $SetupJournalInfoBuffer "" journal_prepare_info_empty
+    StrCmp $SetupJournalInfoBuffer 0 journal_prepare_info_empty
+    Goto journal_prepare_done
+journal_prepare_info_empty:
+    StrCmp $SetupJournalRecord "" journal_prepare_record_empty
+    Goto journal_prepare_done
+journal_prepare_record_empty:
+    Call ${PREFIX}ValidateFreshInstallJournalRoot
+    StrCmp $SetupCode 0 journal_prepare_root_ready
+    Goto journal_prepare_cleanup
+journal_prepare_root_ready:
+    ; The validator returns SetupCode=0 on success. Restore the prepare
+    ; transaction's fail-closed status before any later fallible operation.
+    StrCpy $SetupCode 13
+    ; Preallocate before the directory create so validation need not allocate
+    ; after an irreversible CREATE_NEW operation.
+    System::Alloc 52
+    Pop $SetupJournalInfoBuffer
+    StrCmp $SetupJournalInfoBuffer 0 journal_prepare_cleanup
+    StrCpy $0 $SetupOwnerSid
+    StrCpy $8 0
+    System::Call 'advapi32::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "O:$0D:P(A;;GA;;;$0)(A;;GA;;;SY)(A;;GA;;;BA)", i 1, *p .r8, p 0) i.r1'
+    StrCmp $1 0 journal_prepare_cleanup
+    StrCmp $8 0 journal_prepare_cleanup
+    StrCpy $SetupJournalSecurityDescriptor $8
+    System::Call '*(i 12, p r8, i 0) p.r9' ; x86 SECURITY_ATTRIBUTES, non-inheritable
+    StrCmp $9 0 journal_prepare_cleanup
+    StrCpy $SetupJournalSecurityAttributes $9
+    System::Call 'kernel32::GetModuleHandleW(w "kernel32.dll") p.r1'
+    StrCmp $1 0 journal_prepare_cleanup
+    System::Call 'kernel32::GetProcAddress(p r1, m "CreateDirectory2W") p.r2'
+    StrCmp $2 0 journal_prepare_cleanup
+    ; Create the fixed state directory relative to the pinned empty product root.
+    ; FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE;
+    ; share-read only; DISALLOW_PATH_REDIRECTS; apply protected current-user ACL.
+    System::Call '::$2(w "$SetupFixedRoot\.GitHubBackupTool.state", i 0x130081, i 1, i 1, p $SetupJournalSecurityAttributes) p.r0 ?e'
+    Pop $GuardLastError
+    StrCmp $0 0 journal_prepare_cleanup
+    StrCmp $0 -1 journal_prepare_cleanup
+    StrCpy $SetupJournalDirectoryHandle $0
+    StrCpy $SetupJournalDirectoryCreated 1
+    StrCpy $SetupJournalDirectoryDeletePending 0
+    StrCpy $SetupJournalDirectoryIdentity ""
+    StrCpy $GuardLastError 0
+    Call ${PREFIX}ValidateFreshInstallJournalDirectory
+    StrCmp $SetupCode 0 journal_prepare_directory_ready
+    Goto journal_prepare_cleanup
+journal_prepare_directory_ready:
+    Call ${PREFIX}ValidateFreshInstallJournalDirectory
+    StrCmp $SetupCode 0 journal_prepare_file_parent_ready
+    Goto journal_prepare_cleanup
+journal_prepare_file_parent_ready:
+    StrCpy $SetupCode 13
+    ; CREATE_NEW and share-none make collisions and pre-existing journals a hard
+    ; refusal. The handle and ownership flag are stored before any validation.
+    System::Call 'kernel32::CreateFileW(w "$SetupFixedRoot\.GitHubBackupTool.state\journal.ini", i 0xC0010000, i 0, p $SetupJournalSecurityAttributes, i 1, i 0x00200080, p 0) p.r0 ?e'
+    Pop $GuardLastError
+    StrCmp $0 -1 journal_prepare_cleanup
+    StrCmp $0 0 journal_prepare_cleanup
+    StrCpy $SetupJournalFileHandle $0
+    StrCpy $SetupJournalFileCreated 1
+    StrCpy $SetupJournalFileDeletePending 0
+    StrCpy $SetupJournalFileIdentity ""
+    StrCpy $SetupJournalFileHash ""
+    StrCpy $GuardLastError 0
+    Call ${PREFIX}ValidateFreshInstallJournalFile
+    StrCmp $SetupCode 0 journal_prepare_file_created
+    Goto journal_prepare_cleanup
+journal_prepare_file_created:
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalRecord "[GitHubBackupSetupJournal]$\r$\nschema=1$\r$\nproductId=${SETUP_PRODUCT_ID}$\r$\nownerSid=$SetupOwnerSid$\r$\nappVersion=${SETUP_APP_VERSION}$\r$\nsourceCommit=${SETUP_SOURCE_COMMIT}$\r$\npayloadSha256=${SETUP_APP_SHA256}$\r$\n${SETUP_APP_NAME}=${SETUP_APP_SHA256}$\r$\n${SETUP_NOTICE_NAME}=${SETUP_NOTICE_SHA256}$\r$\nphase=PREPARED$\r$\n"
+    StrLen $3 $SetupJournalRecord
+    IntCmpU $3 1024 journal_prepare_cleanup journal_prepare_record_bounded journal_prepare_cleanup
+journal_prepare_record_bounded:
+    IntOp $3 $3 * 2 ; UTF-16LE byte count, excluding the BOM
+    System::Call '*(&i2 0xFEFF) p.r7'
+    StrCmp $7 0 journal_prepare_cleanup
+    System::Call 'kernel32::WriteFile(p $SetupJournalFileHandle, p r7, i 2, *i .r4, p 0) i.r5'
+    System::Free $7
+    StrCmp $5 0 journal_prepare_cleanup
+    StrCmp $4 2 0 journal_prepare_cleanup
+    System::Call 'kernel32::WriteFile(p $SetupJournalFileHandle, w "$SetupJournalRecord", i r3, *i .r4, p 0) i.r5'
+    StrCmp $5 0 journal_prepare_cleanup
+    StrCmp $4 $3 0 journal_prepare_cleanup
+    System::Call 'kernel32::FlushFileBuffers(p $SetupJournalFileHandle) i.r1'
+    StrCmp $1 0 journal_prepare_cleanup
+    Call ${PREFIX}ValidateFreshInstallJournalFile
+    StrCmp $SetupCode 0 journal_prepare_hash
+    Goto journal_prepare_cleanup
+journal_prepare_hash:
+    Push $GuardHandle
+    Push $GuardDirectory
+    Push $GuardHash
+    StrCpy $GuardHandle $SetupJournalFileHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 journal_prepare_hash_ok
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    Goto journal_prepare_cleanup
+journal_prepare_hash_ok:
+    StrCpy $SetupJournalFileHash $GuardHash
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    StrCpy $SetupJournalPhase "PREPARED"
+    StrCpy $SetupCode 0
+journal_prepare_cleanup:
+    StrCmp $SetupJournalRecord "" journal_prepare_free_attributes
+    StrCpy $SetupJournalRecord ""
+journal_prepare_free_attributes:
+    StrCmp $SetupJournalSecurityAttributes "" journal_prepare_free_descriptor
+    StrCmp $SetupJournalSecurityAttributes 0 journal_prepare_free_descriptor
+    System::Free $SetupJournalSecurityAttributes
+    StrCpy $SetupJournalSecurityAttributes 0
+journal_prepare_free_descriptor:
+    StrCmp $SetupJournalSecurityDescriptor "" journal_prepare_free_info
+    StrCmp $SetupJournalSecurityDescriptor 0 journal_prepare_free_info
+    System::Call 'kernel32::LocalFree(p $SetupJournalSecurityDescriptor) p.r1'
+    StrCmp $1 0 journal_prepare_descriptor_freed
+    StrCpy $SetupCode 13
+    Goto journal_prepare_free_info
+journal_prepare_descriptor_freed:
+    StrCpy $SetupJournalSecurityDescriptor 0
+journal_prepare_free_info:
+    StrCmp $SetupJournalInfoBuffer "" journal_prepare_done
+    StrCmp $SetupJournalInfoBuffer 0 journal_prepare_done
+    System::Free $SetupJournalInfoBuffer
+    StrCpy $SetupJournalInfoBuffer 0
+journal_prepare_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Append and flush FILES_WRITTEN only after both expected file copies have
+; returned success and their exact handles remain registered in the ledger.
+Function ${PREFIX}WriteFreshInstallJournalFilesWritten
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupJournalPhase "PREPARED" journal_files_prepared
+    Goto journal_files_done
+journal_files_prepared:
+    StrCmp $SetupCopyTxnAppCreated 1 journal_files_app_created
+    Goto journal_files_done
+journal_files_app_created:
+    StrCmp $SetupCopyTxnAppHandle "" journal_files_done
+    StrCmp $SetupCopyTxnAppHandle 0 journal_files_done
+    StrCmp $SetupCopyTxnAppIdentity "" journal_files_done
+    StrCmp $SetupCopyTxnAppHash "${SETUP_APP_SHA256}" journal_files_app_valid
+    Goto journal_files_done
+journal_files_app_valid:
+    StrCmp $SetupCopyTxnNoticeCreated 1 journal_files_notice_created
+    Goto journal_files_done
+journal_files_notice_created:
+    StrCmp $SetupCopyTxnNoticeHandle "" journal_files_done
+    StrCmp $SetupCopyTxnNoticeHandle 0 journal_files_done
+    StrCmp $SetupCopyTxnNoticeIdentity "" journal_files_done
+    StrCmp $SetupCopyTxnNoticeHash "${SETUP_NOTICE_SHA256}" journal_files_ledger_valid
+    Goto journal_files_done
+journal_files_ledger_valid:
+    Call ${PREFIX}ValidateFreshInstallJournalFile
+    StrCmp $SetupCode 0 journal_files_record_check
+    Goto journal_files_done
+journal_files_record_check:
+    ; Detect any unexpected journal change before appending the second phase.
+    Push $GuardHandle
+    Push $GuardDirectory
+    Push $GuardHash
+    StrCpy $GuardHandle $SetupJournalFileHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 journal_files_record_hash
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    Goto journal_files_done
+journal_files_record_hash:
+    ; HashHandleSha256 clears SetupCode on success; mismatch is still failure.
+    StrCpy $SetupCode 13
+    StrCmp $GuardHash $SetupJournalFileHash journal_files_append
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    Goto journal_files_done
+journal_files_append:
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    ; From here until the post-flush hash succeeds, every failure must stay nonzero.
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalRecord "phase=FILES_WRITTEN$\r$\n"
+    StrLen $3 $SetupJournalRecord
+    IntOp $3 $3 * 2
+    System::Call 'kernel32::SetFilePointerEx(p $SetupJournalFileHandle, l 0, p 0, i 2) i.r1'
+    StrCmp $1 0 journal_files_cleanup
+    System::Call 'kernel32::WriteFile(p $SetupJournalFileHandle, w "$SetupJournalRecord", i r3, *i .r4, p 0) i.r5'
+    StrCmp $5 0 journal_files_cleanup
+    StrCmp $4 $3 0 journal_files_cleanup
+    System::Call 'kernel32::FlushFileBuffers(p $SetupJournalFileHandle) i.r1'
+    StrCmp $1 0 journal_files_cleanup
+    Call ${PREFIX}ValidateFreshInstallJournalFile
+    StrCmp $SetupCode 0 journal_files_hash_updated
+    Goto journal_files_cleanup
+journal_files_hash_updated:
+    Push $GuardHandle
+    Push $GuardDirectory
+    Push $GuardHash
+    StrCpy $GuardHandle $SetupJournalFileHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 journal_files_hash_ok
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    Goto journal_files_cleanup
+journal_files_hash_ok:
+    StrCpy $SetupJournalFileHash $GuardHash
+    Pop $GuardHash
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    StrCpy $SetupJournalPhase "FILES_WRITTEN"
+    StrCpy $SetupCode 0
+journal_files_cleanup:
+    StrCpy $SetupJournalRecord ""
+journal_files_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Delete only the journal file and state directory created by this transaction.
+; A pending disposition keeps the exact handle/identity until CloseHandle works;
+; errors never clear ownership slots or fall back to pathname deletion.
+Function ${PREFIX}RollbackFreshInstallJournal
+    !insertmacro SetupSaveRegisters
+    StrCpy $SetupCode 13
+    StrCmp $SetupJournalFileCreated "" journal_rollback_file_created_empty
+    StrCmp $SetupJournalFileCreated 0 journal_rollback_file_created_empty
+    StrCmp $SetupJournalFileCreated 1 journal_rollback_file_created
+    Goto journal_rollback_done
+journal_rollback_file_created:
+    StrCmp $SetupJournalFileHandle "" journal_rollback_done
+    StrCmp $SetupJournalFileHandle 0 journal_rollback_done
+    StrCmp $SetupJournalFileDeletePending 1 journal_rollback_file_close
+    StrCmp $SetupJournalFileDeletePending "" journal_rollback_file_pending_empty
+    StrCmp $SetupJournalFileDeletePending 0 journal_rollback_file_pending_empty
+    Goto journal_rollback_done
+journal_rollback_file_pending_empty:
+    Call ${PREFIX}ValidateFreshInstallJournalFile
+    StrCmp $SetupCode 0 journal_rollback_file_dispose
+    Goto journal_rollback_done
+journal_rollback_file_dispose:
+    ; The validator succeeded with SetupCode=0; cleanup failures must stay nonzero.
+    StrCpy $SetupCode 13
+    System::Alloc 1
+    Pop $0
+    StrCmp $0 0 journal_rollback_done
+    System::Call '*$0(&i1 1)'
+    System::Call 'kernel32::SetFileInformationByHandle(p $SetupJournalFileHandle, i 4, p r0, i 1) i.r1'
+    System::Free $0
+    StrCmp $1 0 journal_rollback_done
+    StrCpy $SetupJournalFileDeletePending 1
+journal_rollback_file_close:
+    System::Call 'kernel32::CloseHandle(p $SetupJournalFileHandle) i.r0'
+    StrCmp $0 0 journal_rollback_done
+    StrCpy $SetupJournalFileHandle 0
+    StrCpy $SetupJournalFileIdentity ""
+    StrCpy $SetupJournalFileHash ""
+    StrCpy $SetupJournalFileCreated 0
+    StrCpy $SetupJournalFileDeletePending 0
+    Goto journal_rollback_directory
+journal_rollback_file_created_empty:
+    StrCmp $SetupJournalFileHandle "" journal_rollback_file_identity_empty
+    StrCmp $SetupJournalFileHandle 0 journal_rollback_file_identity_empty
+    Goto journal_rollback_done
+journal_rollback_file_identity_empty:
+    StrCmp $SetupJournalFileIdentity "" journal_rollback_file_hash_empty
+    Goto journal_rollback_done
+journal_rollback_file_hash_empty:
+    StrCmp $SetupJournalFileHash "" journal_rollback_file_pending_state_empty
+    Goto journal_rollback_done
+journal_rollback_file_pending_state_empty:
+    StrCmp $SetupJournalFileDeletePending "" journal_rollback_directory
+    StrCmp $SetupJournalFileDeletePending 0 journal_rollback_directory
+    Goto journal_rollback_done
+
+journal_rollback_directory:
+    StrCmp $SetupJournalDirectoryCreated "" journal_rollback_directory_created_empty
+    StrCmp $SetupJournalDirectoryCreated 0 journal_rollback_directory_created_empty
+    StrCmp $SetupJournalDirectoryCreated 1 journal_rollback_directory_created
+    Goto journal_rollback_done
+journal_rollback_directory_created:
+    StrCmp $SetupJournalDirectoryHandle "" journal_rollback_done
+    StrCmp $SetupJournalDirectoryHandle 0 journal_rollback_done
+    StrCmp $SetupJournalDirectoryDeletePending 1 journal_rollback_directory_close
+    StrCmp $SetupJournalDirectoryDeletePending "" journal_rollback_directory_pending_empty
+    StrCmp $SetupJournalDirectoryDeletePending 0 journal_rollback_directory_pending_empty
+    Goto journal_rollback_done
+journal_rollback_directory_pending_empty:
+    Call ${PREFIX}ValidateFreshInstallJournalDirectory
+    StrCmp $SetupCode 0 journal_rollback_directory_dispose
+    Goto journal_rollback_done
+journal_rollback_directory_dispose:
+    ; The validator succeeded with SetupCode=0; cleanup failures must stay nonzero.
+    StrCpy $SetupCode 13
+    System::Alloc 1
+    Pop $0
+    StrCmp $0 0 journal_rollback_done
+    System::Call '*$0(&i1 1)'
+    System::Call 'kernel32::SetFileInformationByHandle(p $SetupJournalDirectoryHandle, i 4, p r0, i 1) i.r1'
+    System::Free $0
+    StrCmp $1 0 journal_rollback_done
+    StrCpy $SetupJournalDirectoryDeletePending 1
+journal_rollback_directory_close:
+    System::Call 'kernel32::CloseHandle(p $SetupJournalDirectoryHandle) i.r0'
+    StrCmp $0 0 journal_rollback_done
+    StrCpy $SetupJournalDirectoryHandle 0
+    StrCpy $SetupJournalDirectoryIdentity ""
+    StrCpy $SetupJournalDirectoryCreated 0
+    StrCpy $SetupJournalDirectoryDeletePending 0
+    StrCpy $SetupJournalPhase ""
+    StrCpy $SetupCode 0
+    Goto journal_rollback_done
+journal_rollback_directory_created_empty:
+    StrCmp $SetupJournalDirectoryHandle "" journal_rollback_directory_identity_empty
+    StrCmp $SetupJournalDirectoryHandle 0 journal_rollback_directory_identity_empty
+    Goto journal_rollback_done
+journal_rollback_directory_identity_empty:
+    StrCmp $SetupJournalDirectoryIdentity "" journal_rollback_directory_pending_state_empty
+    Goto journal_rollback_done
+journal_rollback_directory_pending_state_empty:
+    StrCmp $SetupJournalDirectoryDeletePending "" journal_rollback_empty_success
+    StrCmp $SetupJournalDirectoryDeletePending 0 journal_rollback_empty_success
+    Goto journal_rollback_done
+journal_rollback_empty_success:
+    StrCpy $SetupJournalPhase ""
+    StrCpy $SetupCode 0
+journal_rollback_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
 ; Copy the only two payload files permitted by the v1 fresh-install contract.
 ; The empty-root scan returns a retained root/ancestor lease; both file copies
 ; reuse it. Successful file handles stay in separate transaction slots until a
@@ -2667,6 +3683,11 @@ copy_txn_root_valid:
     StrCpy $GuardHandle 0
     StrCpy $GuardIdentity ""
     StrCpy $SetupCopyRootLeasePending 0
+    Call ${PREFIX}PrepareFreshInstallJournal
+    StrCmp $SetupCode 0 copy_txn_journal_ready
+    Goto copy_txn_abort
+copy_txn_journal_ready:
+    StrCmp $SetupJournalPhase "PREPARED" 0 copy_txn_abort
     StrCpy $SetupCopyTargetName "${SETUP_APP_NAME}"
     Call ${PREFIX}CopyTrustedStageFileToFixedRoot
     StrCmp $SetupCode 0 copy_txn_copy_notice
@@ -2674,9 +3695,14 @@ copy_txn_root_valid:
 copy_txn_copy_notice:
     StrCpy $SetupCopyTargetName "${SETUP_NOTICE_NAME}"
     Call ${PREFIX}CopyTrustedStageFileToFixedRoot
+    StrCmp $SetupCode 0 copy_txn_files_written
+    Goto copy_txn_abort
+copy_txn_files_written:
+    Call ${PREFIX}WriteFreshInstallJournalFilesWritten
     StrCmp $SetupCode 0 copy_txn_success
     Goto copy_txn_abort
 copy_txn_success:
+    StrCmp $SetupJournalPhase "FILES_WRITTEN" 0 copy_txn_abort
     StrCpy $SetupCode 0
     Goto copy_txn_done
 copy_txn_root_bad:
@@ -2687,6 +3713,380 @@ copy_txn_abort:
     Call ${PREFIX}AbortFreshInstallCopyTransaction
     StrCpy $SetupCode 13
 copy_txn_done:
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Write the canonical ownership receipt only after the payload journal is in
+; FILES_WRITTEN and both generated companion files have retained, verified
+; handles. The receipt itself is CREATE_NEW, flushed, revalidated, hashed and
+; parsed from its original handle before the caller may commit the install.
+Function ${PREFIX}WriteFreshInstallReceipt
+    !insertmacro SetupSaveRegisters
+    Push $GuardHandle
+    Push $GuardDirectory
+    Push $GuardIdentity
+    Push $GuardHash
+    Push $GuardLastError
+    StrCpy $SetupCode 13
+    StrCmp $SetupMode "install" receipt_write_mode_ok
+    Goto receipt_write_done
+receipt_write_mode_ok:
+    StrCmp $SetupCopyTransactionActive 1 receipt_write_txn_active
+    Goto receipt_write_done
+receipt_write_txn_active:
+    StrCmp $SetupJournalPhase "FILES_WRITTEN" receipt_write_phase_ok
+    Goto receipt_write_done
+receipt_write_phase_ok:
+    StrCmp $SetupCopyTxnAppCreated 1 receipt_write_app_created
+    Goto receipt_write_done
+receipt_write_app_created:
+    StrCmp $SetupCopyTxnAppHandle 0 receipt_write_done
+    StrCmp $SetupCopyTxnAppHash "${SETUP_APP_SHA256}" receipt_write_app_valid
+    Goto receipt_write_done
+receipt_write_app_valid:
+    StrCmp $SetupCopyTxnNoticeCreated 1 receipt_write_notice_created
+    Goto receipt_write_done
+receipt_write_notice_created:
+    StrCmp $SetupCopyTxnNoticeHandle 0 receipt_write_done
+    StrCmp $SetupCopyTxnNoticeHash "${SETUP_NOTICE_SHA256}" receipt_write_notice_valid
+    Goto receipt_write_done
+receipt_write_notice_valid:
+    StrCmp $SetupInstallUninstallerHandle 0 receipt_write_uninstaller_handle
+    Goto receipt_write_done
+receipt_write_uninstaller_handle:
+    StrCmp $SetupInstallUninstallerIdentity "" receipt_write_done
+    StrCpy $GuardValue $SetupInstallUninstallerHash
+    StrCpy $GuardValueLength 64
+    Call ${PREFIX}ValidateHexText
+    StrCmp $SetupCode 0 receipt_write_uninstaller_hash
+    Goto receipt_write_done
+receipt_write_uninstaller_hash:
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalVerifyObjectHandle $SetupInstallUninstallerHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot\${SETUP_UNINSTALLER_NAME}"
+    StrCpy $SetupJournalVerifyIdentity $SetupInstallUninstallerIdentity
+    StrCpy $SetupJournalVerifyDirectory 0
+    StrCpy $SetupJournalVerifyCreated 1
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 receipt_write_uninstaller_verified
+    Goto receipt_write_done
+receipt_write_uninstaller_verified:
+    StrCpy $SetupInstallUninstallerIdentity $SetupJournalVerifyIdentity
+    StrCpy $GuardHandle $SetupInstallUninstallerHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 receipt_write_uninstaller_hash_matches
+    Goto receipt_write_done
+receipt_write_uninstaller_hash_matches:
+    ; HashHandleSha256 clears SetupCode on success; keep mismatch fail-closed.
+    StrCpy $SetupCode 13
+    StrCmp $GuardHash $SetupInstallUninstallerHash receipt_write_shortcut_handle
+    Goto receipt_write_done
+receipt_write_shortcut_handle:
+    StrCmp $SetupInstallShortcutHandle 0 receipt_write_shortcut_identity
+    Goto receipt_write_done
+receipt_write_shortcut_identity:
+    StrCmp $SetupInstallShortcutIdentity "" receipt_write_done
+    StrCmp $SetupInstallShortcutPath "" receipt_write_done
+    StrCpy $GuardPath $SetupInstallShortcutPath
+    Call ${PREFIX}ValidateLocalPathText
+    StrCmp $SetupCode 0 receipt_write_shortcut_hash
+    Goto receipt_write_done
+receipt_write_shortcut_hash:
+    StrCpy $SetupCode 13
+    StrCpy $GuardValue $SetupInstallShortcutHash
+    StrCpy $GuardValueLength 64
+    Call ${PREFIX}ValidateHexText
+    StrCmp $SetupCode 0 receipt_write_shortcut_verify
+    Goto receipt_write_done
+receipt_write_shortcut_verify:
+    StrCpy $SetupCode 13
+    StrCpy $SetupJournalVerifyObjectHandle $SetupInstallShortcutHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupInstallShortcutPath"
+    StrCpy $SetupJournalVerifyIdentity $SetupInstallShortcutIdentity
+    StrCpy $SetupJournalVerifyDirectory 0
+    StrCpy $SetupJournalVerifyCreated 1
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 receipt_write_shortcut_verified
+    Goto receipt_write_done
+receipt_write_shortcut_verified:
+    StrCpy $SetupInstallShortcutIdentity $SetupJournalVerifyIdentity
+    StrCpy $GuardHandle $SetupInstallShortcutHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 receipt_write_shortcut_hash_matches
+    Goto receipt_write_done
+receipt_write_shortcut_hash_matches:
+    ; HashHandleSha256 clears SetupCode on success; keep mismatch fail-closed.
+    StrCpy $SetupCode 13
+    StrCmp $GuardHash $SetupInstallShortcutHash receipt_write_shortcut_binding
+    Goto receipt_write_done
+receipt_write_shortcut_binding:
+    Call ${PREFIX}ValidateShortcutTargetCapacity
+    StrCmp $SetupCode 0 receipt_write_shortcut_binding_ready
+    Goto receipt_write_done
+receipt_write_shortcut_binding_ready:
+    StrCpy $GuardHandle $SetupInstallShortcutHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}ValidateShortcutBinding
+    StrCmp $SetupCode 0 receipt_write_shortcut_bound
+    Goto receipt_write_done
+receipt_write_shortcut_bound:
+    StrCpy $SetupCode 13
+    StrCmp $SetupInstallReceiptCreated "" receipt_write_created_empty
+    StrCmp $SetupInstallReceiptCreated 0 receipt_write_created_empty
+    Goto receipt_write_done
+receipt_write_created_empty:
+    StrCmp $SetupInstallReceiptHandle "" receipt_write_handle_empty
+    StrCmp $SetupInstallReceiptHandle 0 receipt_write_handle_empty
+    Goto receipt_write_done
+receipt_write_handle_empty:
+    StrCmp $SetupInstallReceiptIdentity "" receipt_write_identity_empty
+    Goto receipt_write_done
+receipt_write_identity_empty:
+    StrCmp $SetupInstallReceiptHash "" receipt_write_hash_empty
+    Goto receipt_write_done
+receipt_write_hash_empty:
+    StrCmp $SetupInstallReceiptSecurityDescriptor "" receipt_write_descriptor_empty
+    StrCmp $SetupInstallReceiptSecurityDescriptor 0 receipt_write_descriptor_empty
+    Goto receipt_write_done
+receipt_write_descriptor_empty:
+    StrCmp $SetupInstallReceiptSecurityAttributes "" receipt_write_attributes_empty
+    StrCmp $SetupInstallReceiptSecurityAttributes 0 receipt_write_attributes_empty
+    Goto receipt_write_done
+receipt_write_attributes_empty:
+    StrCpy $SetupInstallReceiptRecord "[Installation]$\r$\nschema=1$\r$\nproductId=${SETUP_PRODUCT_ID}$\r$\nownerSid=$SetupOwnerSid$\r$\nappVersion=${SETUP_APP_VERSION}$\r$\nsourceCommit=${SETUP_SOURCE_COMMIT}$\r$\npayloadSha256=${SETUP_APP_SHA256}$\r$\n${SETUP_APP_NAME}=${SETUP_APP_SHA256}$\r$\n${SETUP_UNINSTALLER_NAME}=$SetupInstallUninstallerHash$\r$\n${SETUP_NOTICE_NAME}=${SETUP_NOTICE_SHA256}$\r$\nstartMenu=1$\r$\ndesktop=0$\r$\nstartMenuSha256=$SetupInstallShortcutHash$\r$\ndesktopSha256=none$\r$\n"
+    StrLen $3 $SetupInstallReceiptRecord
+    IntCmpU $3 ${NSIS_MAX_STRLEN} receipt_write_record_ready receipt_write_done receipt_write_done
+receipt_write_record_ready:
+    ; Apply the same explicit protected current-SID/SYSTEM/Admin DACL as the
+    ; journal and payload files; the private root's own DACL is not inheritable.
+    StrCpy $SetupCode 13
+    StrCpy $0 $SetupOwnerSid
+    StrCpy $8 0
+    System::Call 'advapi32::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "O:$0D:P(A;;GA;;;$0)(A;;GA;;;SY)(A;;GA;;;BA)", i 1, *p .r8, p 0) i.r1'
+    StrCmp $8 0 receipt_write_done
+    StrCpy $SetupInstallReceiptSecurityDescriptor $8
+    StrCmp $1 0 receipt_write_done
+    System::Call '*(i 12, p r8, i 0) p.r9' ; x86 SECURITY_ATTRIBUTES, non-inheritable
+    StrCmp $9 0 receipt_write_done
+    StrCpy $SetupInstallReceiptSecurityAttributes $9
+    StrCpy $SetupCode 13
+    System::Call 'kernel32::CreateFileW(w "$SetupFixedRoot\${SETUP_RECEIPT_NAME}", i 0xC0010000, i 0, p $SetupInstallReceiptSecurityAttributes, i 1, i 0x80, p 0) p.r0 ?e'
+    Pop $GuardLastError
+    StrCmp $0 -1 receipt_write_done
+    StrCmp $0 0 receipt_write_done
+    StrCpy $SetupInstallReceiptHandle $0
+    StrCpy $SetupInstallReceiptCreated 1
+    StrCpy $SetupJournalVerifyObjectHandle $SetupInstallReceiptHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot\${SETUP_RECEIPT_NAME}"
+    StrCpy $SetupJournalVerifyIdentity ""
+    StrCpy $SetupJournalVerifyDirectory 0
+    StrCpy $SetupJournalVerifyCreated 1
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 receipt_write_file_created
+    Goto receipt_write_done
+receipt_write_file_created:
+    StrCpy $SetupInstallReceiptIdentity $SetupJournalVerifyIdentity
+    StrCpy $SetupCode 13
+    System::Call '*(&i2 0xFEFF) p.r7'
+    StrCmp $7 0 receipt_write_done
+    System::Call 'kernel32::WriteFile(p $SetupInstallReceiptHandle, p r7, i 2, *i .r5, p 0) i.r6'
+    System::Free $7
+    StrCmp $6 0 receipt_write_done
+    StrCmp $5 2 0 receipt_write_done
+    StrLen $4 $SetupInstallReceiptRecord
+    IntOp $4 $4 * 2 ; UTF-16LE bytes; no trailing NUL is written.
+    System::Call 'kernel32::WriteFile(p $SetupInstallReceiptHandle, w "$SetupInstallReceiptRecord", i r4, *i .r5, p 0) i.r6'
+    StrCmp $6 0 receipt_write_done
+    StrCmp $5 $4 0 receipt_write_done
+    System::Call 'kernel32::FlushFileBuffers(p $SetupInstallReceiptHandle) i.r6'
+    StrCmp $6 0 receipt_write_done
+    StrCpy $SetupJournalVerifyIdentity $SetupInstallReceiptIdentity
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 receipt_write_file_verified
+    Goto receipt_write_done
+receipt_write_file_verified:
+    StrCpy $SetupInstallReceiptIdentity $SetupJournalVerifyIdentity
+    StrCpy $GuardHandle $SetupInstallReceiptHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 receipt_write_file_hashed
+    Goto receipt_write_done
+receipt_write_file_hashed:
+    StrCpy $SetupInstallReceiptHash $GuardHash
+    StrCpy $GuardHandle $SetupInstallReceiptHandle
+    StrCpy $GuardIdentity $SetupInstallReceiptIdentity
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}ReadOwnedReceipt
+    StrCmp $SetupCode 0 receipt_write_receipt_parsed
+    Goto receipt_write_done
+receipt_write_receipt_parsed:
+    ; ReadOwnedReceipt clears SetupCode on parse success; mismatches below must
+    ; remain failures instead of accidentally returning the parser's zero.
+    StrCpy $SetupCode 13
+    StrCmp $SetupRecordedUninstallerHash $SetupInstallUninstallerHash receipt_write_uninstaller_matches
+    Goto receipt_write_done
+receipt_write_uninstaller_matches:
+    StrCmp $SetupRecordedStartMenuHash $SetupInstallShortcutHash receipt_write_shortcut_matches
+    Goto receipt_write_done
+receipt_write_shortcut_matches:
+    StrCmp $SetupRecordedDesktop 0 receipt_write_desktop_disabled
+    Goto receipt_write_done
+receipt_write_desktop_disabled:
+    StrCmp $SetupRecordedDesktopHash "none" receipt_write_success
+    Goto receipt_write_done
+receipt_write_success:
+    StrCpy $SetupCode 0
+receipt_write_done:
+    StrCmp $SetupInstallReceiptSecurityAttributes "" receipt_write_free_descriptor
+    StrCmp $SetupInstallReceiptSecurityAttributes 0 receipt_write_free_descriptor
+    System::Free $SetupInstallReceiptSecurityAttributes
+    StrCpy $SetupInstallReceiptSecurityAttributes 0
+receipt_write_free_descriptor:
+    StrCmp $SetupInstallReceiptSecurityDescriptor "" receipt_write_security_cleanup_done
+    StrCmp $SetupInstallReceiptSecurityDescriptor 0 receipt_write_security_cleanup_done
+    System::Call 'kernel32::LocalFree(p $SetupInstallReceiptSecurityDescriptor) p.r0'
+    StrCmp $0 0 receipt_write_descriptor_freed
+    StrCpy $SetupCode 13
+    Goto receipt_write_security_cleanup_done
+receipt_write_descriptor_freed:
+    StrCpy $SetupInstallReceiptSecurityDescriptor 0
+receipt_write_security_cleanup_done:
+    StrCpy $SetupInstallReceiptRecord ""
+    Pop $GuardLastError
+    Pop $GuardHash
+    Pop $GuardIdentity
+    Pop $GuardDirectory
+    Pop $GuardHandle
+    !insertmacro SetupRestoreRegisters
+FunctionEnd
+
+; Dispose only the receipt created by this still-active install transaction.
+; A partial WriteFile is recoverable through the original CREATE_NEW handle and
+; captured file identity; after delete disposition, retries only close that
+; same handle and never reopen or delete by path.
+Function ${PREFIX}RollbackFreshInstallReceipt
+    !insertmacro SetupSaveRegisters
+    Push $GuardHandle
+    Push $GuardDirectory
+    Push $GuardIdentity
+    Push $GuardHash
+    Push $GuardLastError
+    Push $GuardValue
+    Push $GuardValueLength
+    StrCpy $SetupCode 13
+    StrCmp $SetupMode "install" receipt_rollback_mode
+    Goto receipt_rollback_done
+receipt_rollback_mode:
+    StrCmp $SetupCopyTransactionActive 1 receipt_rollback_active
+    Goto receipt_rollback_done
+receipt_rollback_active:
+    StrCmp $SetupInstallReceiptCreated "" receipt_rollback_empty_created
+    StrCmp $SetupInstallReceiptCreated 0 receipt_rollback_empty_created
+    StrCmp $SetupInstallReceiptCreated 1 receipt_rollback_created
+    Goto receipt_rollback_done
+receipt_rollback_created:
+    StrCmp $SetupInstallReceiptHandle "" receipt_rollback_done
+    StrCmp $SetupInstallReceiptHandle 0 receipt_rollback_done
+    StrCmp $SetupInstallReceiptHandle -1 receipt_rollback_done
+    StrCmp $SetupInstallReceiptDeletePending 1 receipt_rollback_close
+    StrCmp $SetupInstallReceiptDeletePending "" receipt_rollback_validate
+    StrCmp $SetupInstallReceiptDeletePending 0 receipt_rollback_validate
+    Goto receipt_rollback_done
+receipt_rollback_validate:
+    Call ${PREFIX}ValidateFreshInstallJournalRoot
+    StrCmp $SetupCode 0 receipt_rollback_root_valid
+    Goto receipt_rollback_done
+receipt_rollback_root_valid:
+    StrCpy $SetupJournalVerifyObjectHandle $SetupInstallReceiptHandle
+    StrCpy $SetupJournalVerifyPath "\\?\$SetupFixedRoot\${SETUP_RECEIPT_NAME}"
+    StrCpy $SetupJournalVerifyIdentity $SetupInstallReceiptIdentity
+    StrCpy $SetupJournalVerifyDirectory 0
+    StrCpy $SetupJournalVerifyCreated 1
+    Call ${PREFIX}ValidateFreshInstallJournalHandle
+    StrCmp $SetupCode 0 receipt_rollback_handle_valid
+    Goto receipt_rollback_done
+receipt_rollback_handle_valid:
+    StrCpy $SetupInstallReceiptIdentity $SetupJournalVerifyIdentity
+    StrCpy $SetupCode 13
+    ; If writing reached a complete hash, require the same bytes before disposal.
+    StrCmp $SetupInstallReceiptHash "" receipt_rollback_dispose
+    StrCpy $GuardValue $SetupInstallReceiptHash
+    StrCpy $GuardValueLength 64
+    Call ${PREFIX}ValidateHexText
+    StrCmp $SetupCode 0 receipt_rollback_hash_format
+    Goto receipt_rollback_done
+receipt_rollback_hash_format:
+    StrCpy $SetupCode 13
+    StrCpy $GuardHandle $SetupInstallReceiptHandle
+    StrCpy $GuardDirectory 0
+    Call ${PREFIX}HashHandleSha256
+    StrCmp $SetupCode 0 receipt_rollback_hash_read
+    Goto receipt_rollback_done
+receipt_rollback_hash_read:
+    ; HashHandleSha256 clears SetupCode; a changed receipt must block disposal.
+    StrCpy $SetupCode 13
+    StrCmp $GuardHash $SetupInstallReceiptHash receipt_rollback_dispose
+    Goto receipt_rollback_done
+receipt_rollback_dispose:
+    StrCpy $SetupCode 13
+    System::Alloc 1
+    Pop $0
+    StrCmp $0 0 receipt_rollback_done
+    System::Call '*$0(&i1 1)'
+    System::Call 'kernel32::SetFileInformationByHandle(p $SetupInstallReceiptHandle, i 4, p r0, i 1) i.r1'
+    System::Free $0
+    StrCmp $1 0 receipt_rollback_done
+    StrCpy $SetupInstallReceiptDeletePending 1
+receipt_rollback_close:
+    System::Call 'kernel32::CloseHandle(p $SetupInstallReceiptHandle) i.r0'
+    StrCmp $0 0 receipt_rollback_done
+    StrCpy $SetupInstallReceiptHandle 0
+    StrCpy $SetupInstallReceiptIdentity ""
+    StrCpy $SetupInstallReceiptHash ""
+    StrCpy $SetupInstallReceiptCreated 0
+    StrCpy $SetupInstallReceiptDeletePending 0
+    StrCpy $SetupCode 0
+    Goto receipt_rollback_done
+receipt_rollback_empty_created:
+    StrCmp $SetupInstallReceiptHandle "" receipt_rollback_empty_identity
+    StrCmp $SetupInstallReceiptHandle 0 receipt_rollback_empty_identity
+    Goto receipt_rollback_done
+receipt_rollback_empty_identity:
+    StrCmp $SetupInstallReceiptIdentity "" receipt_rollback_empty_hash
+    Goto receipt_rollback_done
+receipt_rollback_empty_hash:
+    StrCmp $SetupInstallReceiptHash "" receipt_rollback_empty_pending
+    Goto receipt_rollback_done
+receipt_rollback_empty_pending:
+    StrCmp $SetupInstallReceiptDeletePending "" receipt_rollback_empty_success
+    StrCmp $SetupInstallReceiptDeletePending 0 receipt_rollback_empty_success
+    Goto receipt_rollback_done
+receipt_rollback_empty_success:
+    StrCpy $SetupCode 0
+receipt_rollback_done:
+    StrCmp $SetupInstallReceiptSecurityAttributes "" receipt_rollback_free_descriptor
+    StrCmp $SetupInstallReceiptSecurityAttributes 0 receipt_rollback_free_descriptor
+    System::Free $SetupInstallReceiptSecurityAttributes
+    StrCpy $SetupInstallReceiptSecurityAttributes 0
+receipt_rollback_free_descriptor:
+    StrCmp $SetupInstallReceiptSecurityDescriptor "" receipt_rollback_restore_stack
+    StrCmp $SetupInstallReceiptSecurityDescriptor 0 receipt_rollback_restore_stack
+    System::Call 'kernel32::LocalFree(p $SetupInstallReceiptSecurityDescriptor) p.r0'
+    StrCmp $0 0 receipt_rollback_descriptor_freed
+    StrCpy $SetupCode 13
+    Goto receipt_rollback_restore_stack
+receipt_rollback_descriptor_freed:
+    StrCpy $SetupInstallReceiptSecurityDescriptor 0
+receipt_rollback_restore_stack:
+    Pop $GuardValueLength
+    Pop $GuardValue
+    Pop $GuardLastError
+    Pop $GuardHash
+    Pop $GuardIdentity
+    Pop $GuardDirectory
+    Pop $GuardHandle
     !insertmacro SetupRestoreRegisters
 FunctionEnd
 
@@ -2839,6 +4239,10 @@ rollback_app_hash_empty:
     StrCmp $SetupCopyTxnAppDeletePending 0 rollback_app_absent_done
     Goto rollback_txn_done
 rollback_app_absent_done:
+    Call ${PREFIX}RollbackFreshInstallJournal
+    StrCmp $SetupCode 0 rollback_journal_cleaned
+    Goto rollback_txn_done
+rollback_journal_cleaned:
     StrCpy $SetupCode 0
 rollback_txn_done:
     !insertmacro SetupRestoreRegisters
@@ -2998,6 +4402,11 @@ Function ${PREFIX}AbortFreshInstallCopyTransaction
     StrCmp $SetupCopyTransactionActive 1 abort_txn_active
     Goto abort_txn_done
 abort_txn_active:
+    Call ${PREFIX}RollbackFreshInstallReceipt
+    StrCmp $SetupCode 0 abort_txn_receipt_rollback_ok
+    StrCpy $SetupCode 13
+    Goto abort_txn_done
+abort_txn_receipt_rollback_ok:
     Call ${PREFIX}RollbackFreshInstallPayloadCopies
     StrCmp $SetupCode 0 abort_txn_rollback_ok
     StrCpy $SetupCode 13
@@ -3074,7 +4483,41 @@ staged_release_app_pending_empty:
     StrCmp $SetupCopyTxnNoticeDeletePending 0 staged_release_notice_pending_empty
     Goto staged_release_refuse_target
 staged_release_notice_pending_empty:
-    Goto staged_release_preflight_ok
+    StrCmp $SetupJournalFileHandle "" staged_release_journal_file_handle_empty
+    StrCmp $SetupJournalFileHandle 0 staged_release_journal_file_handle_empty
+    Goto staged_release_refuse_target
+staged_release_journal_file_handle_empty:
+    StrCmp $SetupJournalFileCreated "" staged_release_journal_file_created_empty
+    StrCmp $SetupJournalFileCreated 0 staged_release_journal_file_created_empty
+    Goto staged_release_refuse_target
+staged_release_journal_file_created_empty:
+    StrCmp $SetupJournalFileIdentity "" staged_release_journal_file_identity_empty
+    Goto staged_release_refuse_target
+staged_release_journal_file_identity_empty:
+    StrCmp $SetupJournalFileHash "" staged_release_journal_file_hash_empty
+    Goto staged_release_refuse_target
+staged_release_journal_file_hash_empty:
+    StrCmp $SetupJournalFileDeletePending "" staged_release_journal_directory_handle_empty
+    StrCmp $SetupJournalFileDeletePending 0 staged_release_journal_directory_handle_empty
+    Goto staged_release_refuse_target
+staged_release_journal_directory_handle_empty:
+    StrCmp $SetupJournalDirectoryHandle "" staged_release_journal_directory_created_empty
+    StrCmp $SetupJournalDirectoryHandle 0 staged_release_journal_directory_created_empty
+    Goto staged_release_refuse_target
+staged_release_journal_directory_created_empty:
+    StrCmp $SetupJournalDirectoryCreated "" staged_release_journal_directory_identity_empty
+    StrCmp $SetupJournalDirectoryCreated 0 staged_release_journal_directory_identity_empty
+    Goto staged_release_refuse_target
+staged_release_journal_directory_identity_empty:
+    StrCmp $SetupJournalDirectoryIdentity "" staged_release_journal_directory_pending_empty
+    Goto staged_release_refuse_target
+staged_release_journal_directory_pending_empty:
+    StrCmp $SetupJournalDirectoryDeletePending "" staged_release_journal_phase_empty
+    StrCmp $SetupJournalDirectoryDeletePending 0 staged_release_journal_phase_empty
+    Goto staged_release_refuse_target
+staged_release_journal_phase_empty:
+    StrCmp $SetupJournalPhase "" staged_release_preflight_ok
+    Goto staged_release_refuse_target
 staged_release_refuse_target:
     StrCpy $SetupCode 13
     Goto staged_release_done_end
@@ -3115,6 +4558,11 @@ staged_release_descriptor_done:
     StrCpy $9 1
     StrCpy $SetupCode 0
 staged_release_fresh_root_scratch_done:
+    Call ${PREFIX}ReleaseFreshInstallJournalScratch
+    StrCmp $SetupCode 0 staged_release_journal_scratch_done
+    StrCpy $9 1
+    StrCpy $SetupCode 0
+staged_release_journal_scratch_done:
     Goto staged_release_source
 staged_release_source:
     StrCmp $SetupCopySourceHandle "" staged_release_root

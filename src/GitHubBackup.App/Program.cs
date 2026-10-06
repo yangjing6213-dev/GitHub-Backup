@@ -5,8 +5,13 @@ namespace GitHubBackup.App;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (SetupCommand.IsSetupRequest(args))
+        {
+            Environment.ExitCode = SetupCommand.Execute(args);
+            return;
+        }
         ApplicationConfiguration.Initialize();
         SingleInstanceCoordinator instance;
         try

@@ -242,6 +242,97 @@ public sealed class AuthServiceTests
     }
 
     [TestMethod]
+    public async Task Device_code_prompt_opens_only_fixed_page_once_and_keeps_code_only_in_ephemeral_ui_output()
+    {
+        const string code = "ABCD-EFGH";
+        var opened = new List<string>();
+        var displayed = new List<string>();
+        var runner = new ProgressOutputRunner(
+            ["! First copy your one-time code: ABCD-", "EFGH\n", "! First copy your one-time code: IJKL-MNOP\n"],
+            new(1, false, false, [], []));
+        using var h = new AuthHarness(opened.Add, runner);
+
+        AuthResult result = await h.Login(new InlineProgress(displayed.Add));
+
+        Assert.AreEqual("AUTH_LOGIN_FAILED_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED", result.ErrorCode);
+        CollectionAssert.AreEqual(new[] { AuthService.DeviceLoginUrl }, opened);
+        CollectionAssert.AreEqual(new[] { "! First copy your one-time code: ABCD-", "EFGH\n", "! First copy your one-time code: IJKL-MNOP\n" }, displayed);
+        Assert.AreEqual(ProcessOutputMode.EphemeralText, runner.Requests.Single().OutputMode);
+        Assert.IsFalse(runner.Requests.Single().Arguments.Any(argument => argument.Contains(code, StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public async Task Browser_open_failure_is_safe_and_does_not_interrupt_forwarding_device_code()
+    {
+        var displayed = new List<string>();
+        var runner = new ProgressOutputRunner(
+            ["! First copy your one-time code: ABCD-EFGH\n"],
+            new(1, false, false, [], []));
+        using var h = new AuthHarness(_ => throw new InvalidOperationException("PRIVATE_BROWSER_EXCEPTION_CANARY"), runner);
+
+        AuthResult result = await h.Login(new InlineProgress(displayed.Add));
+
+        Assert.AreEqual("AUTH_LOGIN_FAILED_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED", result.ErrorCode);
+        Assert.IsFalse(result.AuthReady);
+        Assert.IsTrue(result.BrowserOpenFailed);
+        Assert.AreEqual("! First copy your one-time code: ABCD-EFGH\n", string.Concat(displayed));
+        Assert.IsFalse(result.ToString().Contains("PRIVATE_BROWSER_EXCEPTION_CANARY", StringComparison.Ordinal));
+        Assert.HasCount(1, runner.Requests);
+    }
+
+    [TestMethod]
+    public async Task Successful_login_keeps_shared_credential_warning_when_browser_open_failed()
+    {
+        const string prompt = "! First copy your one-time code: ABCD-EFGH\n";
+        var loginRunner = new PromptThenScriptedRunner(prompt);
+        using var h = new AuthHarness(_ => throw new InvalidOperationException(), loginRunner);
+        loginRunner.Next = h.Runner;
+        loginRunner.CompleteLogin = () => File.WriteAllText(h.Hosts, AuthHarness.Metadata);
+        h.QueueStatus(); h.QueueApi();
+
+        AuthResult result = await h.Login();
+
+        Assert.IsTrue(result.AuthReady);
+        Assert.AreEqual("fixture-user", result.Login);
+        Assert.AreEqual("AUTH_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED", result.ErrorCode);
+        Assert.IsTrue(result.BrowserOpenFailed);
+    }
+
+    private sealed class InlineProgress(Action<string> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value);
+    }
+
+    private sealed class ProgressOutputRunner(string[] output, ProcessResult result) : IProcessRunner
+    {
+        internal List<ProcessRequest> Requests { get; } = [];
+        public Task<ProcessResult> RunAsync(ProcessRequest request, OperationJob job, IProgress<string>? progress, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); Requests.Add(request);
+            foreach (string chunk in output) progress?.Report(chunk);
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class PromptThenScriptedRunner(string prompt) : IProcessRunner
+    {
+        internal IProcessRunner? Next { get; set; }
+        internal Action? CompleteLogin { get; set; }
+        public Task<ProcessResult> RunAsync(ProcessRequest request, OperationJob job, IProgress<string>? progress, CancellationToken cancellationToken)
+        {
+            if (request.Arguments.SequenceEqual(["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"]))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                progress?.Report(prompt);
+                CompleteLogin?.Invoke();
+                return Task.FromResult(new ProcessResult(0, false, false, [], []));
+            }
+            return (Next ?? throw new InvalidOperationException("Test runner was not initialized."))
+                .RunAsync(request, job, progress, cancellationToken);
+        }
+    }
+
+    [TestMethod]
     [DataRow("api_host: attacker.invalid\n")]
     [DataRow("version: \"1\"\nversion: \"1\"\n")]
     [DataRow("version: &x \"1\"\n")]
@@ -446,17 +537,18 @@ public sealed class AuthServiceTests
         internal OperationJob? LastDetectionJob;
         internal Func<OperationJob,CancellationToken,Task<ToolInventory>>? Detect;
         internal void SetNull(string path) => root.SetNullDacl(path);
-        internal AuthHarness()
+        internal AuthHarness(Action<string>? openBrowser = null, IProcessRunner? processRunner = null)
         {
             Paths = AppPaths.Create(root.Path);
             using var lease = AppDataPathPolicy.Acquire(Paths, Paths.AppGhConfigDirectory, AppDataEntryKind.Directory, true);
             Environment = ChildEnvironmentBuilder.CreateBase(new Dictionary<string,string?> { ["SystemRoot"] = System.Environment.GetEnvironmentVariable("SystemRoot"), ["TEMP"] = root.Path }, []);
-            Service = new(Paths, Runner, Store, (job, token) => { Redetections++; LastDetectionJob = job; return Detect is null ? Task.FromResult(FreshTools ?? Tools) : Detect(job, token); });
+            Service = new(Paths, processRunner ?? Runner, Store, (job, token) => { Redetections++; LastDetectionJob = job; return Detect is null ? Task.FromResult(FreshTools ?? Tools) : Detect(job, token); }, openBrowser);
         }
         internal void Write(string name, string contents) { using var stream = AclPolicy.CreateRestrictedFile(Path.Combine(Paths.AppGhConfigDirectory, name), root.User); stream.Write(Encoding.UTF8.GetBytes(contents)); }
         internal void Seed() { Write("config.yml", "version: \"1\"\n"); Write("hosts.yml", ""); }
         internal Task<AuthResult> Check() => Service.CheckAsync(Tools, Environment, Job, default);
         internal Task<AuthResult> Login() => Service.LoginAsync(Tools, Environment, Job, true, null, default);
+        internal Task<AuthResult> Login(IProgress<string>? progress) => Service.LoginAsync(Tools, Environment, Job, true, progress, default);
         internal void QueueStatus(Action? mutate = null, string? text = null) => Runner.Results.Enqueue(request =>
         {
             CollectionAssert.AreEqual(new[] { "auth", "status", "--active", "--hostname", "github.com", "--json", "hosts" }, request.Arguments.ToArray());

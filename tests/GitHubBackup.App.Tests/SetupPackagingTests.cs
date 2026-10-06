@@ -20,10 +20,18 @@ public sealed class SetupPackagingTests
     public void Shipped_notice_contains_exact_component_license_payloads()
     {
         byte[] notice = File.ReadAllBytes(Path.Combine(RepoRoot(), "publish", "Setup", "NOTICE.txt"));
-        const string header = "GitHubBackup setup - internal candidate\n"
-            + "Copyright (c) 2026 yangjing6213-dev. All rights reserved.\n"
-            + "This notice does not grant a license to the application's source code.\n"
-            + "The current-user installer is intended to retain settings, logs, credentials, and backups on uninstall.\n"
+        string originalLicense = File.ReadAllText(Path.Combine(RepoRoot(), "LICENSE"), new UTF8Encoding(false, true))
+            .Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        originalLicense = System.Text.RegularExpressions.Regex.Replace(originalLicense, "[ \\t]+(?=\\n)", "");
+        string header = "GitHubBackup setup - local unsigned build\n"
+            + "Copyright (c) 2026 yangjing6213-dev.\n"
+            + "Original GitHub Backup code is licensed under the MIT License below.\n"
+            + "Third-party components retain their own licenses reproduced in this notice.\n"
+            + "The current-user installer is intended to retain settings, logs, credentials, and backups on uninstall.\n\n"
+            + "----- BEGIN GitHub Backup MIT License -----\n"
+            + originalLicense
+            + (originalLicense.EndsWith('\n') ? "" : "\n")
+            + "----- END GitHub Backup MIT License -----\n\n"
             + "Raw upstream SHA-256 values:\n"
             + "NSIS 3.12 COPYING: 388357C1215FF403C5EBDE3A5ECD273E68F8B79A579996775245D1EE65442ABA\n"
             + "Microsoft.NETCore.App.Runtime.win-x64 10.0.12 LICENSE.TXT: D7A68596AB69B06F51CA278A6545148E4269A9381C26D597C13DF5D88E08CF5B\n"
@@ -172,7 +180,7 @@ public sealed class SetupPackagingTests
     }
 
     [TestMethod]
-    public void Formal_installer_source_is_fixed_and_fails_closed_until_lifecycle_guards_exist()
+    public void Formal_installer_source_is_fixed_and_delegates_to_guarded_managed_lifecycle()
     {
         string setupPath = Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi");
         Assert.IsTrue(File.Exists(setupPath), "SETUP_INSTALLER_SOURCE_MISSING");
@@ -182,11 +190,10 @@ public sealed class SetupPackagingTests
             "Unicode true", "RequestExecutionLevel user", "!include \"MUI2.nsh\"",
             "!include \"SetupGuards.nsh\"", "!insertmacro SetupNativeFoundation \"\"",
             "!insertmacro SetupNativeFoundation \"un.\"", "SetShellVarContext current",
-            "SetRegView 64", "Call ValidateHost", "Call ValidateDirectoryArguments",
-            "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\""
+            "SetRegView 64", "Call ValidateHost", "Call ValidateDirectoryArguments"
         })
             StringAssert.Contains(source, required);
-        Assert.IsTrue(HasActiveFailStopBeforeOutput(source), "INCOMPLETE_INSTALLER_MUST_STOP_BEFORE_OUTPUT");
+        AssertManagedLifecycleDelegation(source);
         Assert.IsLessThan(source.IndexOf("Call ValidateDirectoryArguments", StringComparison.Ordinal),
             source.IndexOf("Call ValidateHost", StringComparison.Ordinal));
         StringAssert.Contains(source, "Function .onInit");
@@ -197,9 +204,9 @@ public sealed class SetupPackagingTests
             source.Contains("MUI_FINISHPAGE_RUN", StringComparison.Ordinal),
             "NO_DIRECTORY_OVERRIDE_OR_DEFAULT_APP_LAUNCH");
         foreach (string line in source.Split('\n').Select(line => line.TrimStart()))
-            Assert.IsFalse(new[] { "File ", "Delete ", "RMDir ", "WriteReg", "CreateShortCut ",
-                "Exec ", "ExecWait ", "WriteUninstaller " }.Any(line.StartsWith),
-                "INCOMPLETE_INSTALLER_MUST_NOT_MUTATE_PRODUCT");
+            Assert.IsFalse(new[] { "Delete ", "RMDir ", "WriteReg", "CreateShortCut ",
+                "Exec ", "ExecShell " }.Any(line.StartsWith),
+                "WRAPPER_MUST_NOT_MUTATE_PRODUCT_OR_LAUNCH_ITS_UI_DIRECTLY");
 
         string harness = File.ReadAllText(Path.Combine(RepoRoot(), "tests", "GitHubBackup.App.Tests",
             "Fixtures", "SetupHarness.nsi"));
@@ -262,10 +269,10 @@ public sealed class SetupPackagingTests
     }
 
     [TestMethod]
-    public void Commented_or_conditional_fail_stop_cannot_satisfy_formal_installer_contract()
+    public void Commented_or_conditional_fail_stop_cannot_satisfy_synthetic_compile_contract()
     {
-        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
         const string stop = "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\"";
+        string source = "Unicode true\n" + stop + "\nOutFile \"${SETUP_OUTPUT_FILE}\"\n";
         Assert.IsTrue(HasActiveFailStopBeforeOutput(source));
         foreach (string replacement in new[]
         {
@@ -281,10 +288,10 @@ public sealed class SetupPackagingTests
     }
 
     [TestMethod]
-    public void Continued_comment_and_tab_macro_cannot_hide_formal_fail_stop()
+    public void Continued_comment_and_tab_macro_cannot_hide_synthetic_fail_stop()
     {
-        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
         const string stop = "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\"";
+        string source = "Unicode true\n" + stop + "\nOutFile \"${SETUP_OUTPUT_FILE}\"\n";
         string[] accepted = new[]
         {
             (Name: "tab macro", Replacement: "!macro\tNeverCalled\n" + stop + "\n!macroend"),
@@ -428,6 +435,10 @@ public sealed class SetupPackagingTests
             "StrCpy $SetupCode 0"
         })
             StringAssert.Contains(copy, required, "STAGED_COPY_CONTRACT_MISSING: " + required);
+        Assert.IsFalse(copy.Contains(
+            "StrCmp $1 \"\\\\?\\$SetupFixedRoot\\\\$SetupCopyStagingName\" 0 copy_failure",
+            StringComparison.Ordinal),
+            "STAGING_FINAL_PATH_MUST_USE_THE_SAME_SINGLE_SEPARATOR_AS_CREATEFILEW");
 
         int validateName = copy.IndexOf("Call ${PREFIX}ValidateCopyManifestName", StringComparison.Ordinal);
         int openSource = copy.IndexOf("Call ${PREFIX}OpenPathIdentityLease", StringComparison.Ordinal);
@@ -488,10 +499,10 @@ public sealed class SetupPackagingTests
         StringAssert.Contains(manifest, "copy_manifest_refuse");
 
         string installer = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
-        StringAssert.Contains(installer, "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\"");
+        AssertManagedLifecycleDelegation(installer);
         Assert.IsFalse(installer.Contains("Call CopyTrustedStageFileToFixedRoot", StringComparison.Ordinal) ||
             installer.Contains("Call un.CopyTrustedStageFileToFixedRoot", StringComparison.Ordinal),
-            "STAGED_COPY_PRIMITIVE_MUST_REMAIN_UNWIRED_UNTIL_TRANSACTION_REVIEW");
+            "PRODUCT_COPY_MUST_BE_DELEGATED_TO_MANAGED_LIFECYCLE");
     }
 
     [TestMethod]
@@ -668,10 +679,10 @@ public sealed class SetupPackagingTests
         StringAssert.Contains(releaseCopy, "StrCmp $SetupCopyTxnNoticeCreated 0 staged_release_notice_created_empty");
 
         string installer = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
-        StringAssert.Contains(installer, "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\"");
+        AssertManagedLifecycleDelegation(installer);
         Assert.IsFalse(installer.Contains("Call CopyFreshInstallPayloadFilesToFixedRoot", StringComparison.Ordinal) ||
             installer.Contains("Call un.CopyFreshInstallPayloadFilesToFixedRoot", StringComparison.Ordinal),
-            "FILE_TRANSACTION_MUST_REMAIN_UNWIRED_UNTIL_THE_FULL_INSTALL_LIFECYCLE_IS_REVIEWED");
+            "PRODUCT_TRANSACTION_MUST_BE_DELEGATED_TO_MANAGED_LIFECYCLE");
 
         static int CountOccurrences(string source, string value)
         {
@@ -742,25 +753,43 @@ public sealed class SetupPackagingTests
         string transaction = FunctionBody(guard, "CopyFreshInstallPayloadFilesToFixedRoot");
         int prepareJournal = transaction.IndexOf("Call ${PREFIX}PrepareFreshInstallJournal", StringComparison.Ordinal);
         int copyApp = transaction.IndexOf("Call ${PREFIX}CopyTrustedStageFileToFixedRoot", StringComparison.Ordinal);
+        int copyNotice = transaction.IndexOf("Call ${PREFIX}CopyTrustedStageFileToFixedRoot", copyApp + 1, StringComparison.Ordinal);
         int writeFilesPhase = transaction.IndexOf("Call ${PREFIX}WriteFreshInstallJournalFilesWritten", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, copyApp, "APP_COPY_CALL_MISSING");
         Assert.IsGreaterThanOrEqualTo(0, prepareJournal,
             "PREPARED_JOURNAL_MUST_BE_DURABLE_BEFORE_ANY_PRODUCT_FILE_CREATE");
         Assert.IsGreaterThan(prepareJournal, copyApp,
             "PREPARED_JOURNAL_MUST_PRECEDE_THE_FIRST_PRODUCT_COPY");
-        Assert.IsGreaterThan(copyApp, writeFilesPhase,
+        Assert.IsGreaterThanOrEqualTo(0, copyNotice, "NOTICE_COPY_CALL_MISSING");
+        Assert.IsGreaterThan(copyApp, copyNotice, "NOTICE_COPY_MUST_FOLLOW_APP_COPY");
+        Assert.IsGreaterThan(copyNotice, writeFilesPhase,
             "FILES_WRITTEN_MUST_BE_RECORDED_ONLY_AFTER_BOTH_PAYLOAD_COPIES");
+
+        string inspect = FunctionBody(guard, "ValidateFreshInstallJournalHandle");
+        foreach (string required in new[]
+        {
+            "GetFileInformationByHandle", "GetFinalPathNameByHandleW",
+            "GetFileInformationByHandleEx", "Call ${PREFIX}ValidatePrivateHandleAcl",
+            "SetupJournalVerifyIdentity", "SetupJournalVerifyCreated"
+        })
+            StringAssert.Contains(inspect, required, "RETURNED_HANDLE_MUST_BE_VALIDATED: " + required);
+
+        string root = FunctionBody(guard, "ValidateFreshInstallJournalRoot");
+        foreach (string required in new[] { "SetupCopyRootHandle", "SetupCopyRootIdentity", "GuardPathPins", "GuardPathPinCount" })
+            StringAssert.Contains(root, required, "JOURNAL_MUST_REMAIN_BOUND_TO_PINNED_FIXED_ROOT: " + required);
 
         string prepare = FunctionBody(guard, "PrepareFreshInstallJournal");
         StringAssert.Contains(prepare, "CreateDirectory2W",
             "STATE_DIRECTORY_MUST_BE_CREATED_WITH_THE_EXISTING_FIXED-DIRECTORY_PRIMITIVE");
         StringAssert.Contains(prepare, "journal.ini",
             "JOURNAL_PATH_MUST_BE_FIXED");
-        StringAssert.Contains(prepare, "i 1",
-            "JOURNAL_FILE_MUST_USE_CREATE_NEW_NOT_OPEN_ALWAYS_OR_TRUNCATE");
-        StringAssert.Contains(prepare, "GetFileInformationByHandleEx",
-            "CREATED_JOURNAL_IDENTITY_MUST_COME_FROM_ITS_RETURNED_HANDLE");
-        StringAssert.Contains(prepare, "Call ${PREFIX}ValidatePrivateHandleAcl",
-            "JOURNAL_ACL_MUST_BE_CHECKED_ON_THE_RETURNED_HANDLE");
+        StringAssert.Contains(prepare, ".GitHubBackupTool.state",
+            "JOURNAL_MUST_USE_THE_FIXED_PRIVATE_STATE_DIRECTORY");
+        StringAssert.Contains(prepare,
+            "CreateFileW(w \"$SetupFixedRoot\\.GitHubBackupTool.state\\journal.ini\", i 0xC0010000, i 0, p $SetupJournalSecurityAttributes, i 1, i 0x00200080, p 0)",
+            "JOURNAL_FILE_MUST_USE_CREATE_NEW_SHARE_NONE_AND_OPEN_REPARSE_POINT");
+        StringAssert.Contains(prepare, "Call ${PREFIX}ValidateFreshInstallJournalDirectory");
+        StringAssert.Contains(prepare, "Call ${PREFIX}ValidateFreshInstallJournalFile");
         StringAssert.Contains(prepare, "FlushFileBuffers",
             "PREPARED_MUST_BE_FLUSHED_BEFORE_PAYLOAD_CREATION");
         StringAssert.Contains(prepare, "Call ${PREFIX}HashHandleSha256",
@@ -773,23 +802,383 @@ public sealed class SetupPackagingTests
         string update = FunctionBody(guard, "WriteFreshInstallJournalFilesWritten");
         foreach (string required in new[]
         {
-            "SetupCopyRootHandle",
-            "GuardPathPins",
+            "SetupCopyTxnAppCreated",
+            "SetupCopyTxnNoticeCreated",
             "SetupJournalFileHandle",
-            "SetupJournalFileIdentity",
+            "SetupJournalFileHash",
+            "Call ${PREFIX}ValidateFreshInstallJournalFile",
             "FILES_WRITTEN",
             "FlushFileBuffers",
-            "Call ${PREFIX}HashHandleSha256",
-            "Call ${PREFIX}ValidatePrivateHandleAcl"
+            "Call ${PREFIX}HashHandleSha256"
         })
             StringAssert.Contains(update, required, "PHASE_UPDATE_MUST_RETAIN_AND_REVALIDATE_THE_CREATED_JOURNAL: " + required);
+        StringAssert.Contains(update,
+            "SetFilePointerEx(p $SetupJournalFileHandle, l 0, p 0, i 2)",
+            "FILES_WRITTEN_MUST_APPEND_AT_EOF_NOT_OVERWRITE_PREPARED");
 
         string rollback = FunctionBody(guard, "RollbackFreshInstallPayloadCopies");
-        Assert.IsTrue(rollback.Contains("SetupJournalFileHandle", StringComparison.Ordinal) &&
-            rollback.Contains("SetupJournalDirectoryHandle", StringComparison.Ordinal),
+        StringAssert.Contains(rollback, "Call ${PREFIX}RollbackFreshInstallJournal",
             "PAIRED_ABORT_MUST_INCLUDE_JOURNAL_FILE_AND_CREATED_STATE_DIRECTORY");
+        string journalRollback = FunctionBody(guard, "RollbackFreshInstallJournal");
+        Assert.AreEqual(1, journalRollback.Split("journal_rollback_file_pending_empty:", StringSplitOptions.None).Length - 1,
+            "JOURNAL_ROLLBACK_LABELS_MUST_BE_UNIQUE_WITHIN_THE_FUNCTION");
+        Assert.AreEqual(1, journalRollback.Split("journal_rollback_directory_pending_empty:", StringSplitOptions.None).Length - 1,
+            "JOURNAL_ROLLBACK_LABELS_MUST_BE_UNIQUE_WITHIN_THE_FUNCTION");
+        foreach (string required in new[]
+        {
+            "SetupJournalFileHandle", "SetupJournalDirectoryHandle",
+            "SetFileInformationByHandle", "CloseHandle",
+            "SetupJournalFileDeletePending", "SetupJournalDirectoryDeletePending",
+            "ValidateFreshInstallJournalFile", "ValidateFreshInstallJournalDirectory"
+        })
+            StringAssert.Contains(journalRollback, required,
+                "ROLLBACK_MUST_RETAIN_AND_REVALIDATE_EXACT_JOURNAL_OBJECTS: " + required);
+        Assert.IsFalse(journalRollback.Contains("DeleteFileW", StringComparison.Ordinal) ||
+            journalRollback.Contains("RMDir", StringComparison.Ordinal) ||
+            journalRollback.Contains("MoveFile", StringComparison.Ordinal),
+            "ROLLBACK_MUST_NOT_USE_PATH_BASED_JOURNAL_CLEANUP");
+        int fileDisposition = journalRollback.IndexOf(
+            "SetFileInformationByHandle(p $SetupJournalFileHandle, i 4", StringComparison.Ordinal);
+        int filePending = journalRollback.IndexOf("StrCpy $SetupJournalFileDeletePending 1", fileDisposition, StringComparison.Ordinal);
+        int fileClose = journalRollback.IndexOf("CloseHandle(p $SetupJournalFileHandle)", filePending, StringComparison.Ordinal);
+        int fileClear = journalRollback.IndexOf("StrCpy $SetupJournalFileHandle 0", fileClose, StringComparison.Ordinal);
+        Assert.IsTrue(fileDisposition >= 0 && filePending > fileDisposition && fileClose > filePending && fileClear > fileClose,
+            "FILE_HANDLE_AND_DELETE_STATE_MUST_CLEAR_ONLY_AFTER_SUCCESSFUL_CLOSE");
+        int directoryDisposition = journalRollback.IndexOf(
+            "SetFileInformationByHandle(p $SetupJournalDirectoryHandle, i 4", StringComparison.Ordinal);
+        int directoryPending = journalRollback.IndexOf("StrCpy $SetupJournalDirectoryDeletePending 1", directoryDisposition, StringComparison.Ordinal);
+        int directoryClose = journalRollback.IndexOf("CloseHandle(p $SetupJournalDirectoryHandle)", directoryPending, StringComparison.Ordinal);
+        int directoryClear = journalRollback.IndexOf("StrCpy $SetupJournalDirectoryHandle 0", directoryClose, StringComparison.Ordinal);
+        Assert.IsTrue(directoryDisposition >= 0 && directoryPending > directoryDisposition &&
+            directoryClose > directoryPending && directoryClear > directoryClose,
+            "DIRECTORY_HANDLE_AND_DELETE_STATE_MUST_CLEAR_ONLY_AFTER_SUCCESSFUL_CLOSE");
+        string release = FunctionBody(guard, "ReleaseStagedCopyHandles");
+        StringAssert.Contains(release, "SetupJournalFileHandle");
+        StringAssert.Contains(release, "SetupJournalDirectoryHandle");
+        StringAssert.Contains(release, "SetupJournalPhase");
         string installer = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
-        StringAssert.Contains(installer, "!error \"SETUP_LIFECYCLE_NOT_IMPLEMENTED\"");
+        AssertManagedLifecycleDelegation(installer);
+    }
+
+    [TestMethod]
+    public void Synthetic_journal_harness_is_confined_to_a_test_fixture()
+    {
+        string harness = File.ReadAllText(Path.Combine(RepoRoot(), "tests", "GitHubBackup.App.Tests",
+            "Fixtures", "SetupJournalHarness.nsi"));
+        foreach (string required in new[]
+        {
+            "SETUP_JOURNAL_FIXTURE_PARENT_REQUIRED",
+            "SETUP_JOURNAL_HARNESS_OUTPUT_REQUIRED",
+            "CreateDirectory \"${SETUP_JOURNAL_FIXTURE_PARENT}\\temp\"",
+            "SetEnvironmentVariableW(w \"TEMP\", w \"${SETUP_JOURNAL_FIXTURE_PARENT}\\temp\")",
+            "SetEnvironmentVariableW(w \"TMP\", w \"${SETUP_JOURNAL_FIXTURE_PARENT}\\temp\")",
+            "Call PrepareFreshInstallJournal",
+            "Call CopyTrustedStageFileToFixedRoot",
+            "Call WriteFreshInstallJournalFilesWritten",
+            "Call AbortFreshInstallCopyTransaction",
+            "${SETUP_JOURNAL_FIXTURE_PARENT}\\product",
+            "GetFileAttributesW",
+            "SetErrorLevel 0"
+        })
+            StringAssert.Contains(harness, required, "SYNTHETIC_JOURNAL_CHECK_MISSING: " + required);
+        int tempCreate = harness.IndexOf("CreateDirectory \"${SETUP_JOURNAL_FIXTURE_PARENT}\\temp\"", StringComparison.Ordinal);
+        int setTemp = tempCreate < 0 ? -1 : harness.IndexOf("SetEnvironmentVariableW(w \"TEMP\"", tempCreate, StringComparison.Ordinal);
+        int setTmp = setTemp < 0 ? -1 : harness.IndexOf("SetEnvironmentVariableW(w \"TMP\"", setTemp, StringComparison.Ordinal);
+        int pluginDirectory = setTmp < 0 ? -1 : harness.IndexOf("InitPluginsDir", setTmp, StringComparison.Ordinal);
+        Assert.IsTrue(tempCreate >= 0 && setTemp > tempCreate && setTmp > setTemp && pluginDirectory > setTmp,
+            "SYNTHETIC_PLUGIN_DIRECTORY_MUST_BE_REDIRECTED_TO_THE_FIXTURE_BEFORE_CREATION");
+        foreach ((string path, string label) in new[]
+        {
+            ("${SETUP_APP_NAME}", "app"),
+            ("${SETUP_NOTICE_NAME}", "notice"),
+            (".GitHubBackupTool.setup-stage", "stage"),
+            (".GitHubBackupTool.state", "state")
+        })
+        {
+            StringAssert.Contains(harness,
+                $"System::Call 'kernel32::GetFileAttributesW(w \"$SetupFixedRoot\\{path}\") i.r0 ?e'\n    Pop $GuardLastError\n    StrCmp $0 -1 harness_{label}_absence_error harness_fail",
+                "HARNESS_MUST_CAPTURE_FAILURE_FOR_EACH_ROLLED_BACK_OBJECT: " + path);
+            StringAssert.Contains(harness, $"harness_{label}_absence_error:\n    StrCmp $GuardLastError 2 ");
+            StringAssert.Contains(harness, $"    StrCmp $GuardLastError 3 ");
+        }
+
+        foreach (string forbidden in new[]
+        {
+            "InstallDir ", "ValidateHost", "ValidateDirectoryArguments",
+            "PinExistingInstallAncestors", "SHGetKnownFolderPath", "Registry::",
+            "HKCU", "HKLM", "GitHubBackup.nsi", "WriteUninstaller"
+        })
+            Assert.IsFalse(harness.Contains(forbidden, StringComparison.OrdinalIgnoreCase),
+                "SYNTHETIC_HARNESS_MUST_NOT_TOUCH_PRODUCT_OR_ACCOUNT_STATE: " + forbidden);
+    }
+
+    [TestMethod]
+    public void Journal_failures_keep_nonzero_status_and_copy_requires_durable_phase()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        static string FunctionBody(string source, string name)
+        {
+            int begin = source.IndexOf("Function ${PREFIX}" + name, StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, begin, name + "_MISSING");
+            int end = source.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+            Assert.IsGreaterThan(begin, end, name + "_UNTERMINATED");
+            return source[begin..end];
+        }
+
+        string prepare = FunctionBody(guard, "PrepareFreshInstallJournal");
+        foreach ((string label, string nextOperation) in new[]
+        {
+            ("journal_prepare_root_ready:", "System::Alloc 52"),
+            ("journal_prepare_file_parent_ready:", "CreateFileW(w \"$SetupFixedRoot\\.GitHubBackupTool.state\\journal.ini\""),
+            ("journal_prepare_file_created:", "StrCpy $SetupJournalRecord")
+        })
+        {
+            int labelIndex = prepare.IndexOf(label, StringComparison.Ordinal);
+            int statusIndex = prepare.IndexOf("StrCpy $SetupCode 13", labelIndex, StringComparison.Ordinal);
+            int operationIndex = prepare.IndexOf(nextOperation, labelIndex, StringComparison.Ordinal);
+            Assert.IsTrue(labelIndex >= 0 && statusIndex > labelIndex && operationIndex > statusIndex,
+                "JOURNAL_PREPARE_FAILURE_MUST_NOT_RETURN_SUCCESS: " + label);
+        }
+
+        string update = FunctionBody(guard, "WriteFreshInstallJournalFilesWritten");
+        int recordHashLabel = update.IndexOf("journal_files_record_hash:", StringComparison.Ordinal);
+        int mismatchStatus = update.IndexOf("StrCpy $SetupCode 13", recordHashLabel, StringComparison.Ordinal);
+        int compare = update.IndexOf("StrCmp $GuardHash $SetupJournalFileHash journal_files_append", recordHashLabel, StringComparison.Ordinal);
+        Assert.IsTrue(recordHashLabel >= 0 && mismatchStatus > recordHashLabel && compare > mismatchStatus,
+            "JOURNAL_HASH_MISMATCH_MUST_REMAIN_A_FAILURE");
+        int appendLabel = update.IndexOf("journal_files_append:", StringComparison.Ordinal);
+        int appendStatus = update.IndexOf("StrCpy $SetupCode 13", appendLabel, StringComparison.Ordinal);
+        int pointerWrite = update.IndexOf("SetFilePointerEx(p $SetupJournalFileHandle", appendLabel, StringComparison.Ordinal);
+        Assert.IsTrue(appendLabel >= 0 && appendStatus > appendLabel && pointerWrite > appendStatus,
+            "JOURNAL_WRITE_AND_FLUSH_FAILURES_MUST_REMAIN_NONZERO");
+
+        string rollback = FunctionBody(guard, "RollbackFreshInstallJournal");
+        foreach ((string label, string operation) in new[]
+        {
+            ("journal_rollback_file_dispose:", "System::Alloc 1"),
+            ("journal_rollback_directory_dispose:", "System::Alloc 1")
+        })
+        {
+            int labelIndex = rollback.IndexOf(label, StringComparison.Ordinal);
+            int statusIndex = rollback.IndexOf("StrCpy $SetupCode 13", labelIndex, StringComparison.Ordinal);
+            int allocate = rollback.IndexOf(operation, labelIndex, StringComparison.Ordinal);
+            Assert.IsTrue(labelIndex >= 0 && statusIndex > labelIndex && allocate > statusIndex,
+                "JOURNAL_ROLLBACK_FAILURE_MUST_NOT_RETURN_SUCCESS: " + label);
+        }
+
+        string transaction = FunctionBody(guard, "CopyFreshInstallPayloadFilesToFixedRoot");
+        StringAssert.Contains(transaction,
+            "Call ${PREFIX}PrepareFreshInstallJournal\n    StrCmp $SetupCode 0 copy_txn_journal_ready\n    Goto copy_txn_abort\ncopy_txn_journal_ready:\n    StrCmp $SetupJournalPhase \"PREPARED\" 0 copy_txn_abort",
+            "PAYLOAD_COPY_MUST_REQUIRE_VERIFIED_PREPARED_PHASE");
+        StringAssert.Contains(transaction,
+            "Call ${PREFIX}WriteFreshInstallJournalFilesWritten\n    StrCmp $SetupCode 0 copy_txn_success\n    Goto copy_txn_abort\ncopy_txn_success:\n    StrCmp $SetupJournalPhase \"FILES_WRITTEN\" 0 copy_txn_abort",
+            "TRANSACTION_MUST_REQUIRE_VERIFIED_FILES_WRITTEN_PHASE");
+    }
+
+    [TestMethod]
+    public void V1_receipt_rejects_desktop_shortcut_outside_approved_install_scope()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        int begin = guard.IndexOf("Function ${PREFIX}ReadOwnedReceipt", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, begin, "OWNED_RECEIPT_PARSER_MISSING");
+        int end = guard.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+        Assert.IsGreaterThan(begin, end, "OWNED_RECEIPT_PARSER_UNTERMINATED");
+        string body = guard[begin..end];
+
+        StringAssert.Contains(body,
+            "StrCmp $SetupRecordedDesktop 0 receipt_desktop_valid\n    Goto receipt_done",
+            "V1_RECEIPT_MUST_REQUIRE_DESKTOP_SHORTCUT_DISABLED");
+        StringAssert.Contains(body, "StrCmp $SetupRecordedDesktopHash \"none\" 0 receipt_done",
+            "V1_RECEIPT_MUST_REJECT_A_DESKTOP_SHORTCUT_HASH");
+        Assert.IsFalse(body.Contains("StrCmp $SetupRecordedDesktop 1", StringComparison.Ordinal) ||
+            body.Contains("$SetupRecordedDesktop == 1", StringComparison.Ordinal),
+            "V1_RECEIPT_MUST_NOT_ACCEPT_DESKTOP_SHORTCUT_STATE");
+    }
+
+    [TestMethod]
+    public void Fresh_install_receipt_is_create_new_flushed_and_verified_from_its_original_handle()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        int begin = guard.IndexOf("Function ${PREFIX}WriteFreshInstallReceipt", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, begin, "FRESH_INSTALL_RECEIPT_WRITER_MISSING");
+        int end = guard.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+        Assert.IsGreaterThan(begin, end, "FRESH_INSTALL_RECEIPT_WRITER_UNTERMINATED");
+        string body = guard[begin..end];
+
+        foreach (string required in new[]
+        {
+            "StrCmp $SetupJournalPhase \"FILES_WRITTEN\"",
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW(w \"O:$0D:P(A;;GA;;;$0)(A;;GA;;;SY)(A;;GA;;;BA)\"",
+            "*(i 12, p r8, i 0) p.r9",
+            "CreateFileW(w \"$SetupFixedRoot\\${SETUP_RECEIPT_NAME}\", i 0xC0010000, i 0, p $SetupInstallReceiptSecurityAttributes, i 1",
+            "System::Free $SetupInstallReceiptSecurityAttributes",
+            "LocalFree(p $SetupInstallReceiptSecurityDescriptor)",
+            "StrCpy $SetupInstallReceiptCreated 1",
+            "System::Call '*(&i2 0xFEFF) p.r7'",
+            "WriteFile(p $SetupInstallReceiptHandle",
+            "FlushFileBuffers(p $SetupInstallReceiptHandle)",
+            "Call ${PREFIX}ValidateFreshInstallJournalHandle",
+            "Call ${PREFIX}HashHandleSha256",
+            "Call ${PREFIX}ReadOwnedReceipt"
+        })
+            StringAssert.Contains(body, required, "FRESH_RECEIPT_CONTRACT_MISSING: " + required);
+
+        int securityDescriptor = body.IndexOf("ConvertStringSecurityDescriptorToSecurityDescriptorW(", StringComparison.Ordinal);
+        int securityAttributes = body.IndexOf("*(i 12, p r8, i 0) p.r9", securityDescriptor, StringComparison.Ordinal);
+        int create = body.IndexOf("CreateFileW(w \"$SetupFixedRoot\\${SETUP_RECEIPT_NAME}\"", StringComparison.Ordinal);
+        int mark = body.IndexOf("StrCpy $SetupInstallReceiptCreated 1", create, StringComparison.Ordinal);
+        int write = body.IndexOf("WriteFile(p $SetupInstallReceiptHandle", mark, StringComparison.Ordinal);
+        int flush = body.IndexOf("FlushFileBuffers(p $SetupInstallReceiptHandle)", write, StringComparison.Ordinal);
+        int validate = body.IndexOf("Call ${PREFIX}ValidateFreshInstallJournalHandle", flush, StringComparison.Ordinal);
+        int hash = body.IndexOf("Call ${PREFIX}HashHandleSha256", validate, StringComparison.Ordinal);
+        int parse = body.IndexOf("Call ${PREFIX}ReadOwnedReceipt", hash, StringComparison.Ordinal);
+        Assert.IsTrue(securityDescriptor >= 0 && securityAttributes > securityDescriptor && create > securityAttributes &&
+            mark > create && write > mark && flush > write && validate > flush && hash > validate && parse > hash,
+            "FRESH_RECEIPT_MUST_HAVE_EXPLICIT_PRIVATE_ACL_AND_BE_CREATE_NEW_FLUSHED_HASHED_AND_PARSED_IN_ORDER");
+        int parsedLabel = body.IndexOf("receipt_write_receipt_parsed:", StringComparison.Ordinal);
+        int failureReset = body.IndexOf("StrCpy $SetupCode 13", parsedLabel, StringComparison.Ordinal);
+        int firstCrossCheck = body.IndexOf("StrCmp $SetupRecordedUninstallerHash $SetupInstallUninstallerHash receipt_write_uninstaller_matches",
+            parsedLabel, StringComparison.Ordinal);
+        Assert.IsTrue(parsedLabel >= 0 && failureReset > parsedLabel && firstCrossCheck > failureReset,
+            "RECEIPT_READBACK_CROSS_CHECKS_MUST_RESTORE_FAILURE_BEFORE_ANY_MISMATCH_EXIT");
+        foreach ((string label, string comparison) in new[]
+        {
+            ("receipt_write_uninstaller_hash_matches:",
+                "StrCmp $GuardHash $SetupInstallUninstallerHash receipt_write_shortcut_handle"),
+            ("receipt_write_shortcut_hash_matches:",
+                "StrCmp $GuardHash $SetupInstallShortcutHash receipt_write_shortcut_binding")
+        })
+        {
+            int matchedHash = body.IndexOf(label, StringComparison.Ordinal);
+            int hashFailureReset = body.IndexOf("StrCpy $SetupCode 13", matchedHash, StringComparison.Ordinal);
+            int hashComparison = body.IndexOf(comparison, matchedHash, StringComparison.Ordinal);
+            Assert.IsTrue(matchedHash >= 0 && hashFailureReset > matchedHash && hashComparison > hashFailureReset,
+                "RECEIPT_HASH_MISMATCH_MUST_REMAIN_A_FAILURE: " + label);
+        }
+    }
+
+    [TestMethod]
+    public void Fresh_install_receipt_writer_preserves_the_callers_last_error_scratch()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        int begin = guard.IndexOf("Function ${PREFIX}WriteFreshInstallReceipt", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, begin, "FRESH_INSTALL_RECEIPT_WRITER_MISSING");
+        int end = guard.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+        Assert.IsGreaterThan(begin, end, "FRESH_INSTALL_RECEIPT_WRITER_UNTERMINATED");
+        string body = guard[begin..end];
+
+        int save = body.IndexOf("Push $GuardLastError", StringComparison.Ordinal);
+        int api = body.IndexOf("CreateFileW(w \"$SetupFixedRoot\\${SETUP_RECEIPT_NAME}\"", StringComparison.Ordinal);
+        int apiResult = body.IndexOf("Pop $GuardLastError", api, StringComparison.Ordinal);
+        int cleanup = body.IndexOf("receipt_write_security_cleanup_done:", StringComparison.Ordinal);
+        int restore = apiResult < 0 ? -1 : body.IndexOf("Pop $GuardLastError", apiResult + 1, StringComparison.Ordinal);
+        int functionRestore = restore < 0 ? -1 : body.IndexOf("!insertmacro SetupRestoreRegisters", restore, StringComparison.Ordinal);
+
+        Assert.IsTrue(save >= 0 && api > save && apiResult > api && cleanup > apiResult &&
+            restore > cleanup && functionRestore > restore,
+            "RECEIPT_WRITER_MUST_CAPTURE_API_ERROR_THEN_RESTORE_CALLER_GUARD_LAST_ERROR_ON_ALL_EXITS");
+    }
+
+    [TestMethod]
+    public void Failed_fresh_install_rolls_back_receipt_before_payload_and_keeps_failed_cleanup_owned()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        static string FunctionBody(string source, string name)
+        {
+            int begin = source.IndexOf("Function ${PREFIX}" + name, StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, begin, name + "_MISSING");
+            int end = source.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+            Assert.IsGreaterThan(begin, end, name + "_UNTERMINATED");
+            return source[begin..end];
+        }
+        string rollback = FunctionBody(guard, "RollbackFreshInstallReceipt");
+        string abort = FunctionBody(guard, "AbortFreshInstallCopyTransaction");
+
+        foreach (string required in new[]
+        {
+            "StrCmp $SetupMode \"install\"",
+            "StrCmp $SetupCopyTransactionActive 1",
+            "Call ${PREFIX}ValidateFreshInstallJournalRoot",
+            "Call ${PREFIX}ValidateFreshInstallJournalHandle",
+            "SetFileInformationByHandle(p $SetupInstallReceiptHandle, i 4",
+            "StrCmp $SetupInstallReceiptCreated 1 receipt_rollback_created",
+            "CloseHandle(p $SetupInstallReceiptHandle)",
+            "StrCpy $SetupInstallReceiptHandle 0",
+            "StrCpy $SetupInstallReceiptIdentity \"\"",
+            "StrCpy $SetupInstallReceiptHash \"\""
+        })
+            StringAssert.Contains(rollback, required, "FRESH_RECEIPT_ROLLBACK_CONTRACT_MISSING: " + required);
+
+        int rollbackReceipt = abort.IndexOf("Call ${PREFIX}RollbackFreshInstallReceipt", StringComparison.Ordinal);
+        int rollbackPayload = abort.IndexOf("Call ${PREFIX}RollbackFreshInstallPayloadCopies", StringComparison.Ordinal);
+        Assert.IsTrue(rollbackReceipt >= 0 && rollbackPayload > rollbackReceipt,
+            "FRESH_RECEIPT_MUST_BE_ROLLED_BACK_BEFORE_PAYLOAD_AND_JOURNAL");
+
+        StringAssert.Contains(rollback, "StrCpy $SetupInstallReceiptDeletePending 1",
+            "FAILED_RECEIPT_CLOSE_MUST_RETAIN_DELETE_PENDING_OWNERSHIP");
+        StringAssert.Contains(rollback,
+            "StrCmp $SetupInstallReceiptDeletePending 1 receipt_rollback_close",
+            "RETRY_MUST_CLOSE_THE_SAME_PENDING_RECEIPT_HANDLE_WITHOUT_REOPENING_BY_PATH");
+        int hashRead = rollback.IndexOf("receipt_rollback_hash_read:", StringComparison.Ordinal);
+        int hashFailureReset = rollback.IndexOf("StrCpy $SetupCode 13", hashRead, StringComparison.Ordinal);
+        int hashCompare = rollback.IndexOf(
+            "StrCmp $GuardHash $SetupInstallReceiptHash receipt_rollback_dispose", hashRead, StringComparison.Ordinal);
+        Assert.IsTrue(hashRead >= 0 && hashFailureReset > hashRead && hashCompare > hashFailureReset,
+            "RECEIPT_ROLLBACK_HASH_MISMATCH_MUST_NOT_AUTHORIZE_DELETION");
+    }
+
+    [TestMethod]
+    public void Private_acl_parser_bounds_sid_to_current_ace_before_validation()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        int begin = guard.IndexOf("Function ${PREFIX}ValidatePrivateHandleAcl", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, begin, "PRIVATE_ACL_VALIDATOR_MISSING");
+        int end = guard.IndexOf("FunctionEnd", begin, StringComparison.Ordinal);
+        Assert.IsGreaterThan(begin, end, "PRIVATE_ACL_VALIDATOR_UNTERMINATED");
+        string body = guard[begin..end];
+
+        const string aceHeader = "System::Call '*$5(&i1.r6, &i1.r7, &i2.r2)'";
+        const string sidCountPointer = "IntOp $GuardValue $5 + 9";
+        const string sidCountRead = "System::Call '*$GuardValue(&i1.r8)'";
+        const string sidBytes = "IntOp $8 $8 * 4\n    IntOp $8 $8 + 16";
+        const string aceBound = "IntCmpU $2 $8 0 acl_done 0";
+        const string sidValidation = "IntOp $GuardSid $5 + 8\n    Call ${PREFIX}ValidateApprovedSid";
+
+        foreach (string required in new[] { aceHeader, sidCountPointer, sidCountRead, sidBytes, aceBound, sidValidation })
+            StringAssert.Contains(body, required, "PRIVATE_ACE_SID_BOUNDS_CHECK_MISSING: " + required);
+        StringAssert.Contains(body, "Push $GuardValue", "PRIVATE_ACL_TEMPORARY_POINTER_MUST_BE_PRESERVED");
+        StringAssert.Contains(body, "Pop $GuardValue", "PRIVATE_ACL_TEMPORARY_POINTER_MUST_BE_PRESERVED");
+
+        int header = body.IndexOf(aceHeader, StringComparison.Ordinal);
+        int pointer = body.IndexOf(sidCountPointer, header, StringComparison.Ordinal);
+        int count = body.IndexOf(sidCountRead, pointer, StringComparison.Ordinal);
+        int size = body.IndexOf(sidBytes, count, StringComparison.Ordinal);
+        int bound = body.IndexOf(aceBound, size, StringComparison.Ordinal);
+        int validate = body.IndexOf(sidValidation, bound, StringComparison.Ordinal);
+        Assert.IsTrue(header >= 0 && pointer > header && count > pointer && size > count &&
+            bound > size && validate > bound,
+            "SID_LENGTH_MUST_BE_BOUNDED_BY_ACE_SIZE_BEFORE_ISVALIDSID_READS_IT");
+    }
+
+    [TestMethod]
+    public void Create_directory2_requests_synchronize_for_retained_directory_handles()
+    {
+        string guard = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh"));
+        StringAssert.Contains(guard,
+            "w \"$SetupLocalAppData\\Programs\", i 0x120081, i 1, i 1, p 0",
+            "SHARED_PROGRAMS_HANDLE_MUST_REQUEST_SYNCHRONIZE_WITHOUT_DROPPING_READ_RIGHTS");
+        StringAssert.Contains(guard,
+            "w \"$SetupFixedRoot\", i 0x120081, i 1, i 1, p $SetupFreshRootSecurityAttributes",
+            "PRODUCT_ROOT_HANDLE_MUST_REQUEST_SYNCHRONIZE_WITHOUT_DROPPING_READ_RIGHTS");
+        StringAssert.Contains(guard,
+            "w \"$SetupFixedRoot\\.GitHubBackupTool.state\", i 0x130081, i 1, i 1, p $SetupJournalSecurityAttributes",
+            "JOURNAL_DIRECTORY_HANDLE_MUST_REQUEST_SYNCHRONIZE_WITHOUT_DROPPING_DELETE_OR_READ_RIGHTS");
     }
 
     [TestMethod]
@@ -971,10 +1360,10 @@ public sealed class SetupPackagingTests
                 "FACT_CHECK_MUST_NOT_MUTATE_PRODUCT_STATE: " + forbidden);
 
         string installer = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
-        Assert.IsTrue(HasActiveFailStopBeforeOutput(installer), "INCOMPLETE_INSTALLER_MUST_STOP_BEFORE_OUTPUT");
+        AssertManagedLifecycleDelegation(installer);
         Assert.IsFalse(installer.Contains("Call CheckFixedInstallFilesAndReceipt", StringComparison.Ordinal) ||
             installer.Contains("Call un.CheckFixedInstallFilesAndReceipt", StringComparison.Ordinal),
-            "FACT_CHECK_MUST_REMAIN_UNCONNECTED_TO_FORMAL_INSTALLER");
+            "PRODUCT_RECEIPT_CHECK_MUST_BE_DELEGATED_TO_MANAGED_LIFECYCLE");
     }
 
     [TestMethod]
@@ -1062,7 +1451,7 @@ public sealed class SetupPackagingTests
             "GetProcAddress(p r1, m \"CreateDirectory2W\")",
             "StrCmp $1 0 programs_parent_refuse",
             "StrCmp $2 0 programs_parent_refuse",
-            "System::Call '::$2(w \"$SetupLocalAppData\\Programs\", i 0x20081, i 1, i 1, p 0) p.r0 ?e'",
+            "System::Call '::$2(w \"$SetupLocalAppData\\Programs\", i 0x120081, i 1, i 1, p 0) p.r0 ?e'",
             "Pop $GuardLastError", "StrCmp $0 0 programs_parent_refuse",
             "StrCmp $0 -1 programs_parent_refuse", "StrCpy $GuardHandle $0",
             "GetFileInformationByHandle(p $GuardHandle",
@@ -1173,7 +1562,7 @@ public sealed class SetupPackagingTests
             "System::Call '*(i 12, p r8, i 0) p.r9'",
             "GetModuleHandleW(w \"kernel32.dll\")",
             "GetProcAddress(p r1, m \"CreateDirectory2W\")",
-            "System::Call '::$2(w \"$SetupFixedRoot\", i 0x20081, i 1, i 1, p $SetupFreshRootSecurityAttributes) p.r0 ?e'",
+            "System::Call '::$2(w \"$SetupFixedRoot\", i 0x120081, i 1, i 1, p $SetupFreshRootSecurityAttributes) p.r0 ?e'",
             "StrCmp $1 0 fresh_root_create_refused", "StrCmp $2 0 fresh_root_create_refused",
             "StrCmp $0 0 fresh_root_create_refused", "StrCmp $0 -1 fresh_root_create_refused",
             "GetFileInformationByHandle(p $GuardHandle",
@@ -1245,9 +1634,8 @@ public sealed class SetupPackagingTests
         string installer = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
         Assert.IsFalse(installer.Contains("Call CreateFreshProductRoot", StringComparison.Ordinal) ||
             installer.Contains("Call un.CreateFreshProductRoot", StringComparison.Ordinal),
-            "FRESH_ROOT_PRIMITIVE_MUST_REMAIN_UNWIRED");
-        Assert.IsTrue(HasActiveFailStopBeforeOutput(installer),
-            "FORMAL_INSTALLER_MUST_REMAIN_FAIL_STOP");
+            "PRODUCT_ROOT_CREATION_MUST_BE_DELEGATED_TO_MANAGED_LIFECYCLE");
+        AssertManagedLifecycleDelegation(installer);
     }
 
     [TestMethod]
@@ -2006,18 +2394,20 @@ public sealed class SetupPackagingTests
         string app = Path.Combine(f.Root, "中文 路径", "GitHubBackup.exe");
         string notice = Path.Combine(f.Root, "中文 路径", "NOTICE.txt");
         string setup = Path.Combine(f.Root, "dist", "GitHubBackup-setup.exe");
+        string uninstaller = Path.Combine(f.Root, "work", "Uninstall.exe");
+        string exportOutput = Path.Combine(f.Root, "work", "UninstallerExport.exe");
         var result = await RunPowerShellAsync("-CommandWithArgs", """
             $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
             $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-SetupIncludeLines'},$true)
             if(-not $fn){throw 'FUNCTION_MISSING'}
             . ([ScriptBlock]::Create($fn.Extent.Text))
             $product=Import-PowerShellDataFile -LiteralPath $args[4]
-            $lines=@(New-SetupIncludeLines $args[1] $args[2] $args[3] '1.2.3.4' ('A'*64) ('b'*40) $product ('C'*64) $args[5])
+            $lines=@(New-SetupIncludeLines $args[1] $args[2] $args[3] '1.2.3.4' ('A'*64) ('b'*40) $product ('C'*64) $args[5] $args[6] ('D'*64) $args[7])
             ConvertTo-Json -InputObject $lines -Compress
-            """, f.BuildScript, app, notice, setup, f.Contract, payloadKind);
+            """, f.BuildScript, app, notice, setup, f.Contract, payloadKind, uninstaller, exportOutput);
         Assert.AreEqual(0, result.ExitCode, result.Stderr);
         using var json = JsonDocument.Parse(result.Stdout);
-        Assert.AreEqual(16, json.RootElement.GetArrayLength());
+        Assert.AreEqual(19, json.RootElement.GetArrayLength());
         Assert.AreEqual("!define SETUP_APP_FILE \"" + app + "\"", json.RootElement[0].GetString());
         Assert.AreEqual("!define SETUP_NOTICE_FILE \"" + notice + "\"", json.RootElement[1].GetString());
         Assert.AreEqual("!define SETUP_OUTPUT_FILE \"" + setup + "\"", json.RootElement[2].GetString());
@@ -2030,15 +2420,489 @@ public sealed class SetupPackagingTests
         Assert.AreEqual("!define SETUP_PRODUCT_ID \"GitHubBackupTool\"", json.RootElement[9].GetString());
         Assert.AreEqual("!define SETUP_APP_NAME \"GitHubBackup.exe\"", json.RootElement[10].GetString());
         Assert.AreEqual("!define SETUP_UNINSTALLER_NAME \"Uninstall.exe\"", json.RootElement[11].GetString());
-        Assert.AreEqual("!define SETUP_RECEIPT_NAME \"install.ini\"", json.RootElement[12].GetString());
-        Assert.AreEqual("!define SETUP_NOTICE_NAME \"NOTICE.txt\"", json.RootElement[13].GetString());
-        Assert.AreEqual("!define SETUP_NOTICE_SHA256 \"" + new string('C', 64) + "\"", json.RootElement[14].GetString());
-        Assert.AreEqual("!define SETUP_PAYLOAD_KIND \"" + payloadKind + "\"", json.RootElement[15].GetString());
+        Assert.AreEqual("!define SETUP_UNINSTALLER_FILE \"" + uninstaller + "\"", json.RootElement[12].GetString());
+        Assert.AreEqual("!define SETUP_UNINSTALLER_SHA256 \"" + new string('D', 64) + "\"", json.RootElement[13].GetString());
+        Assert.AreEqual("!define SETUP_EXPORT_OUTPUT_FILE \"" + exportOutput + "\"", json.RootElement[14].GetString());
+        Assert.AreEqual("!define SETUP_RECEIPT_NAME \"install.ini\"", json.RootElement[15].GetString());
+        Assert.AreEqual("!define SETUP_NOTICE_NAME \"NOTICE.txt\"", json.RootElement[16].GetString());
+        Assert.AreEqual("!define SETUP_NOTICE_SHA256 \"" + new string('C', 64) + "\"", json.RootElement[17].GetString());
+        Assert.AreEqual("!define SETUP_PAYLOAD_KIND \"" + payloadKind + "\"", json.RootElement[18].GetString());
         Assert.IsFalse(File.ReadAllText(f.Contract).Contains("RegistryKey", StringComparison.Ordinal),
             "UNINSTALL_REGISTRY_IS_OUTSIDE_APPROVED_V1_SCOPE");
         Assert.IsFalse(File.ReadAllText(f.BuildScript).Contains("SETUP_REGISTRY_KEY", StringComparison.Ordinal),
             "BUILD_INCLUDE_MUST_NOT_EMIT_UNINSTALL_REGISTRY_KEY");
     }
+
+    [TestMethod]
+    public async Task Prebuilt_uninstaller_export_then_import_uses_only_an_isolated_synthetic_build()
+    {
+        string? nsisRoot = Environment.GetEnvironmentVariable("GITHUBBACKUP_NSIS_ROOT");
+        if (string.IsNullOrWhiteSpace(nsisRoot) || !File.Exists(Path.Combine(nsisRoot, "makensis.exe")))
+            Assert.Inconclusive("Set GITHUBBACKUP_NSIS_ROOT to an already verified portable NSIS 3.12 folder.");
+
+        using var f = new SetupFixture();
+        f.WriteDirectory(f.Work);
+        string temp = Path.Combine(f.Work, "temp");
+        string appData = Path.Combine(f.Work, "appdata");
+        f.WriteDirectory(temp);
+        f.WriteDirectory(appData);
+
+        string harnessSource = Path.Combine(RepoRoot(), "tests", "GitHubBackup.App.Tests", "Fixtures", "SetupUninstallerExportHarness.nsi");
+        string harness = Path.Combine(f.Work, "SetupUninstallerExportHarness.nsi");
+        f.WriteFile(harness, File.ReadAllBytes(harnessSource));
+        string input = Path.Combine(f.Work, "SetupInputs.nsh");
+        f.WriteFile(input, Encoding.UTF8.GetBytes(string.Join("\n", new[]
+        {
+            "!define SETUP_UNINSTALLER_FILE \"" + Path.Combine(f.Work, "Uninstall.exe") + "\"",
+            "!define SETUP_EXPORT_OUTPUT_FILE \"" + Path.Combine(f.Work, "UninstallerExport.exe") + "\"",
+            "!define SETUP_OUTPUT_FILE \"" + Path.Combine(f.Work, "ImportedSetup.exe") + "\""
+        }) + "\n"));
+
+        var result = await RunPowerShellAsync("-CommandWithArgs", """
+            $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
+            foreach($name in @('Fail','SafePath','UninstallerPeInfo','New-SetupCompilerArguments','Invoke-NsisCompilePass')){
+                $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+                if(-not $fn){throw "FUNCTION_MISSING_$name"}
+                . ([ScriptBlock]::Create($fn.Extent.Text))
+            }
+            $variableNames=@('NSISDIR','NSISCONFDIR','TEMP','TMP','APPDATA')
+            $before=@($variableNames | ForEach-Object { [Environment]::GetEnvironmentVariable($_) })
+            $exportArgs=@(New-SetupCompilerArguments 'EXPORT_UNINST' $args[4] $args[3])
+            Invoke-NsisCompilePass $args[1] $args[2] $args[5] $exportArgs 'SETUP_UNINSTALLER_EXPORT_FAILED'
+            $uninstaller=Join-Path $args[5] 'Uninstall.exe'
+            if(-not [IO.File]::Exists($uninstaller) -or ([IO.FileInfo]$uninstaller).Length -lt 256){throw 'SYNTHETIC_UNINSTALLER_EXPORT_MISSING'}
+            UninstallerPeInfo $uninstaller
+            $beforeHash=(Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash
+            $importArgs=@(New-SetupCompilerArguments 'IMPORT_UNINST' $args[4] $args[3])
+            Invoke-NsisCompilePass $args[1] $args[2] $args[5] $importArgs 'SETUP_COMPILER_FAILED'
+            if(-not [IO.File]::Exists((Join-Path $args[5] 'ImportedSetup.exe'))){throw 'SYNTHETIC_IMPORT_BUILD_MISSING'}
+            if((Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash -cne $beforeHash){throw 'SYNTHETIC_UNINSTALLER_CHANGED'}
+            $after=@($variableNames | ForEach-Object { [Environment]::GetEnvironmentVariable($_) })
+            for($i=0;$i -lt $variableNames.Count;$i++){if($before[$i] -cne $after[$i]){throw 'COMPILER_ENVIRONMENT_NOT_RESTORED'}}
+            [pscustomobject]@{Status='PASS';UninstallerSha256=$beforeHash;UninstallerLength=([IO.FileInfo]$uninstaller).Length;OutputDirectory=$args[5]} | ConvertTo-Json -Compress
+            """, f.BuildScript, Path.Combine(nsisRoot, "makensis.exe"), nsisRoot, harness, input, f.Work);
+        foreach (string name in new[] { "Uninstall.exe", "UninstallerExport.exe", "ImportedSetup.exe" })
+        {
+            string generated = Path.Combine(f.Work, name);
+            if (File.Exists(generated)) f.AdoptGeneratedFile(generated);
+        }
+        Assert.AreEqual(0, result.ExitCode, result.Stderr);
+        string jsonLine = result.Stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Last();
+        using var json = JsonDocument.Parse(jsonLine);
+        Assert.AreEqual("PASS", json.RootElement.GetProperty("Status").GetString());
+        Assert.AreEqual(f.Work, json.RootElement.GetProperty("OutputDirectory").GetString());
+    }
+
+    [TestMethod]
+    public async Task Uninstaller_validation_rejects_directory_and_non_pe_synthetic_artifacts()
+    {
+        using var f = new SetupFixture();
+        f.WriteDirectory(f.Work);
+        string directory = Path.Combine(f.Work, "UninstallDirectory.exe");
+        f.WriteDirectory(directory);
+        string nonPe = Path.Combine(f.Work, "UninstallNotPe.exe");
+        f.WriteFile(nonPe, Encoding.UTF8.GetBytes("not an executable"));
+
+        var result = await RunPowerShellAsync("-CommandWithArgs", """
+            $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
+            foreach($name in @('Fail','UninstallerPeInfo')){
+                $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+                if(-not $fn){throw "FUNCTION_MISSING_$name"}
+                . ([ScriptBlock]::Create($fn.Extent.Text))
+            }
+            function Expect-Code($path,$expected){
+                try { UninstallerPeInfo $path; throw "UNINSTALLER_INPUT_ACCEPTED_$expected" }
+                catch { if($_.Exception.Message -cne $expected){throw "UNEXPECTED_ERROR_$($_.Exception.Message)"} }
+            }
+            Expect-Code $args[1] 'SETUP_UNINSTALLER_FILE_INVALID'
+            Expect-Code $args[2] 'SETUP_UNINSTALLER_PE_INVALID'
+            [pscustomobject]@{Status='PASS'} | ConvertTo-Json -Compress
+            """, f.BuildScript, directory, nonPe);
+        Assert.AreEqual(0, result.ExitCode, result.Stderr);
+        StringAssert.Contains(result.Stdout, "\"Status\":\"PASS\"");
+
+        string build = File.ReadAllText(f.BuildScript);
+        int validator = build.IndexOf("function UninstallerPeInfo", StringComparison.Ordinal);
+        int reparseCheck = build.IndexOf("[IO.FileAttributes]::ReparsePoint", validator, StringComparison.Ordinal);
+        int peOpen = build.IndexOf("[IO.File]::OpenRead($file)", validator, StringComparison.Ordinal);
+        Assert.IsTrue(validator >= 0 && reparseCheck > validator && peOpen > reparseCheck,
+            "UNINSTALLER_REPARSE_POINT_MUST_BE_REJECTED_BEFORE_PE_READ");
+    }
+
+    [TestMethod]
+    public void Build_script_exports_and_hashes_the_uninstaller_before_import_pass()
+    {
+        string build = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "Build-Setup.ps1"));
+        int exportArguments = build.IndexOf("New-SetupCompilerArguments 'EXPORT_UNINST'", StringComparison.Ordinal);
+        int exportPass = build.IndexOf("Invoke-NsisCompilePass", exportArguments, StringComparison.Ordinal);
+        int exportCheck = build.IndexOf("UninstallerPeInfo $uninstaller", exportPass, StringComparison.Ordinal);
+        int hash = build.IndexOf("$uninstallerHash = Sha $uninstaller", exportCheck, StringComparison.Ordinal);
+        int importArguments = build.IndexOf("New-SetupCompilerArguments 'IMPORT_UNINST'", hash, StringComparison.Ordinal);
+        int importPass = build.IndexOf("Invoke-NsisCompilePass", importArguments, StringComparison.Ordinal);
+        int finalHash = build.IndexOf("Sha $uninstaller", importPass, StringComparison.Ordinal);
+        Assert.IsTrue(exportArguments >= 0 && exportPass > exportArguments && exportCheck > exportPass &&
+            hash > exportCheck && importArguments > hash && importPass > importArguments && finalHash > importPass,
+            "EXPORT_MUST_BE_VERIFIED_AND_HASHED_BEFORE_IMPORT_PASS");
+        StringAssert.Contains(build, "New-SetupCompilerArguments 'EXPORT_UNINST'");
+        StringAssert.Contains(build, "New-SetupCompilerArguments 'IMPORT_UNINST'");
+        StringAssert.Contains(build, "$env:TEMP = $isolatedTemp");
+        StringAssert.Contains(build, "$env:TMP = $isolatedTemp");
+        StringAssert.Contains(build, "SETUP_UNINSTALLER_HASH_CHANGED");
+        AssertManagedLifecycleDelegation(File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi")));
+    }
+
+    [TestMethod]
+    public void Wrapper_stages_only_private_inputs_and_runs_the_management_entry_points()
+    {
+        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
+        StringAssert.Contains(source, "!ifdef EXPORT_UNINST");
+        StringAssert.Contains(source, "!ifdef IMPORT_UNINST");
+        StringAssert.Contains(source, "!uninstfinalize");
+        StringAssert.Contains(source, "File /oname=${SETUP_APP_NAME} \"${SETUP_APP_FILE}\"");
+        StringAssert.Contains(source, "File /oname=${SETUP_UNINSTALLER_NAME} \"${SETUP_UNINSTALLER_FILE}\"");
+        StringAssert.Contains(source, "File /oname=${SETUP_NOTICE_NAME} \"${SETUP_NOTICE_FILE}\"");
+        StringAssert.Contains(source, "File /oname=SetupManifest.json \"${SETUP_MANIFEST_FILE}\"");
+        StringAssert.Contains(source, "SetOutPath \"$PLUGINSDIR\"");
+        StringAssert.Contains(source, "Call PreparePrivatePluginDirectory");
+        StringAssert.Contains(source, "Call un.PreparePrivatePluginDirectory");
+        StringAssert.Contains(source, "DOTNET_BUNDLE_EXTRACT_BASE_DIR");
+        StringAssert.Contains(source, "$PLUGINSDIR\\.net");
+        StringAssert.Contains(source, "--setup-install \"$PLUGINSDIR\\SetupManifest.json\" \"${SETUP_MANIFEST_SHA256}\"");
+        StringAssert.Contains(source, "--setup-uninstall");
+        StringAssert.Contains(source, "GetFullPathName $0 \"$EXEPATH\"");
+        StringAssert.Contains(source, "SETUP_UNINSTALLER_MUST_SELF_COPY");
+        int releaseStart = source.IndexOf("Function ${PREFIX}ReleasePrivatePluginDirectory", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, releaseStart);
+        int releaseEnd = source.IndexOf("FunctionEnd", releaseStart, StringComparison.Ordinal);
+        Assert.IsGreaterThan(releaseStart, releaseEnd);
+        string releaseBody = source[releaseStart..releaseEnd];
+        int leaveDirectory = releaseBody.IndexOf("SetOutPath \"$TEMP\"", StringComparison.Ordinal);
+        int closeHandle = releaseBody.IndexOf("CloseHandle(p $WrapperPluginHandle)", StringComparison.Ordinal);
+        Assert.IsTrue(leaveDirectory >= 0 && closeHandle > leaveDirectory,
+            "Scratch cleanup must leave its current directory before releasing the held handle.");
+        Assert.AreEqual(1, releaseBody.Split('\n').Count(line => line.Trim().StartsWith("SetOutPath ", StringComparison.Ordinal)));
+        Assert.IsFalse(releaseBody.Split('\n').Any(line => line.Trim().StartsWith("File ", StringComparison.Ordinal)));
+        foreach (string line in source.Remove(releaseStart, releaseEnd - releaseStart).Split('\n').Select(line => line.Trim()))
+        {
+            if (line.StartsWith("SetOutPath ", StringComparison.Ordinal))
+                Assert.AreEqual("SetOutPath \"$PLUGINSDIR\"", line);
+            if (line.StartsWith("ExecWait ", StringComparison.Ordinal))
+            {
+                Assert.AreEqual("ExecWait '${COMMAND}' $WrapperExitCode", line);
+                Assert.IsFalse(line.Contains("_?=", StringComparison.Ordinal));
+            }
+            if (line.StartsWith("!insertmacro RunSetupEngine ", StringComparison.Ordinal))
+            {
+                StringAssert.Contains(line, "\"$PLUGINSDIR\\${SETUP_APP_NAME}\" --setup-");
+                Assert.IsFalse(line.Contains("_?=", StringComparison.Ordinal));
+            }
+        }
+        AssertManagedLifecycleDelegation(source);
+    }
+
+    private static void AssertManagedLifecycleDelegation(string source)
+    {
+        source = source.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.IsFalse(source.Contains("SETUP_LIFECYCLE_NOT_IMPLEMENTED", StringComparison.Ordinal),
+            "ACCEPTED_MANAGED_LIFECYCLE_MUST_NOT_RETAIN_THE_OLD_COMPILE_STOP");
+        const string install = "!insertmacro RunSetupEngine \"\" '\"$PLUGINSDIR\\${SETUP_APP_NAME}\" --setup-install \"$PLUGINSDIR\\SetupManifest.json\" \"${SETUP_MANIFEST_SHA256}\"'";
+        const string uninstall = "!insertmacro RunSetupEngine \"un.\" '\"$PLUGINSDIR\\${SETUP_APP_NAME}\" --setup-uninstall'";
+        CollectionAssert.AreEquivalent(new[] { install, uninstall }, source.Split('\n').Select(line => line.Trim())
+            .Where(line => line.StartsWith("!insertmacro RunSetupEngine ", StringComparison.Ordinal)).ToArray(),
+            "PRODUCT_ENTRY_ARGUMENTS_MUST_BE_EXACT_AND_CANNOT_ACCEPT_AN_ARBITRARY_TARGET");
+        StringAssert.Contains(source, "!ifndef SETUP_MANIFEST_FILE\n        !error \"SETUP_MANIFEST_REQUIRED\"\n    !endif");
+        StringAssert.Contains(source, "!ifndef SETUP_MANIFEST_SHA256\n        !error \"SETUP_MANIFEST_HASH_REQUIRED\"\n    !endif");
+        foreach (var entry in new[] { (Section: "安装", Prefix: "", Command: install), (Section: "Uninstall", Prefix: "un.", Command: uninstall) })
+        {
+            int start = source.IndexOf("Section \"" + entry.Section + "\"", StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, start);
+            int end = source.IndexOf("SectionEnd", start, StringComparison.Ordinal);
+            Assert.IsGreaterThan(start, end);
+            string body = source[start..end];
+            foreach (string guard in new[] { "ValidateHost", "ValidateDirectoryArguments" })
+                StringAssert.Contains(body, "Call " + entry.Prefix + guard
+                    + "\n    ${If} $SetupCode != 0\n        SetErrorLevel $SetupCode\n        Abort\n    ${EndIf}",
+                    "HOST_AND_ARGUMENT_FAILURES_MUST_STOP_BEFORE_EXTRACTION_OR_ENGINE_LAUNCH");
+            int host = body.IndexOf("Call " + entry.Prefix + "ValidateHost", StringComparison.Ordinal);
+            int arguments = body.IndexOf("Call " + entry.Prefix + "ValidateDirectoryArguments", StringComparison.Ordinal);
+            int prepare = body.IndexOf("Call " + entry.Prefix + "PreparePrivatePluginDirectory", StringComparison.Ordinal);
+            int extract = body.IndexOf("SetOutPath \"$PLUGINSDIR\"", StringComparison.Ordinal);
+            int launch = body.IndexOf(entry.Command, StringComparison.Ordinal);
+            Assert.IsTrue(host >= 0 && arguments > host && prepare > arguments && extract > prepare && launch > extract,
+                "EVERY_PRODUCT_ENTRY_MUST_VALIDATE_HOST_AND_FIXED_ARGUMENTS_THEN_PREPARE_PRIVATE_INPUTS_BEFORE_LAUNCH");
+        }
+    }
+
+    [TestMethod]
+    public void Wrapper_verifies_the_held_scratch_directory_owner_before_changing_its_permissions()
+    {
+        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
+        int start = source.IndexOf("Function ${PREFIX}PreparePrivatePluginDirectory", StringComparison.Ordinal);
+        string body = source[start..source.IndexOf("FunctionEnd", start, StringComparison.Ordinal)];
+        int ownerRead = body.IndexOf("GetSecurityInfo(p $WrapperPluginHandle, i 1, i 1", StringComparison.Ordinal);
+        int ownerCompare = body.IndexOf("StrCmpS $6 $SetupOwnerSid 0 wrapper_directory_done", StringComparison.Ordinal);
+        int permissionWrite = body.IndexOf("SetKernelObjectSecurity(p $WrapperPluginHandle", StringComparison.Ordinal);
+        Assert.IsTrue(ownerRead >= 0 && ownerCompare > ownerRead && permissionWrite > ownerCompare,
+            "The exact held-object owner must match the current SID before its DACL can be changed.");
+    }
+
+    [TestMethod]
+    public void Wrapper_reports_actionable_management_failures_without_requests_to_remove_user_data()
+    {
+        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
+        StringAssert.Contains(source, "${If} $WrapperExitCode == 10");
+        StringAssert.Contains(source, "仅支持 Windows 11 25H2 x64，请以普通用户运行，不要以管理员身份运行。");
+        StringAssert.Contains(source, "${ElseIf} $WrapperExitCode == 11");
+        StringAssert.Contains(source, "安装参数不受支持，安装位置固定，不能更改安装目录。");
+        StringAssert.Contains(source, "${ElseIf} $WrapperExitCode == 12");
+        StringAssert.Contains(source, "卸载不会删除备份、设置、日志或凭据。");
+        StringAssert.Contains(source, "文件被占用，或安装位置、权限存在冲突。请先关闭 GitHub 备份程序后重试，无需删除备份。");
+    }
+
+    [TestMethod]
+    public async Task Manifest_generator_binds_exact_fields_and_optional_include_keeps_legacy_inputs()
+    {
+        using var f = new SetupFixture();
+        string manifest = Path.Combine(f.Root, "中文 路径", "SetupManifest.json");
+        var result = await RunPowerShellAsync("-CommandWithArgs", """
+            $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
+            foreach($name in @('Fail','New-SetupManifestJson','New-SetupIncludeLines')){
+                $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+                if(-not $fn){throw "FUNCTION_MISSING_$name"}
+                . ([ScriptBlock]::Create($fn.Extent.Text))
+            }
+            $product=Import-PowerShellDataFile -LiteralPath $args[1]
+            $json=New-SetupManifestJson '1.2.3.4' ('b'*40) ('A'*64) ('D'*64) ('C'*64)
+            $legacy=@(New-SetupIncludeLines 'app' 'notice' 'output' '1.2.3.4' ('A'*64) ('b'*40) $product ('C'*64) 'internal-unsigned' 'uninstaller' ('D'*64) 'export')
+            $current=@(New-SetupIncludeLines 'app' 'notice' 'output' '1.2.3.4' ('A'*64) ('b'*40) $product ('C'*64) 'internal-unsigned' 'uninstaller' ('D'*64) 'export' $args[2] ('E'*64))
+            [pscustomobject]@{Manifest=($json|ConvertFrom-Json);Legacy=$legacy;Current=$current} | ConvertTo-Json -Depth 4 -Compress
+            """, f.BuildScript, f.Contract, manifest);
+        Assert.AreEqual(0, result.ExitCode, result.Stderr);
+        using var json = JsonDocument.Parse(result.Stdout);
+        var record = json.RootElement.GetProperty("Manifest");
+        CollectionAssert.AreEquivalent(new[] { "Version", "SourceCommit", "AppHash", "UninstallerHash", "NoticeHash" },
+            record.EnumerateObject().Select(property => property.Name).ToArray());
+        Assert.AreEqual("1.2.3.4", record.GetProperty("Version").GetString());
+        Assert.AreEqual(new string('b', 40), record.GetProperty("SourceCommit").GetString());
+        Assert.AreEqual(new string('A', 64), record.GetProperty("AppHash").GetString());
+        Assert.AreEqual(new string('D', 64), record.GetProperty("UninstallerHash").GetString());
+        Assert.AreEqual(new string('C', 64), record.GetProperty("NoticeHash").GetString());
+        var legacy = json.RootElement.GetProperty("Legacy");
+        var current = json.RootElement.GetProperty("Current");
+        Assert.AreEqual(19, legacy.GetArrayLength());
+        Assert.AreEqual(21, current.GetArrayLength());
+        for (int i = 0; i < 19; i++) Assert.AreEqual(legacy[i].GetString(), current[i].GetString());
+        Assert.AreEqual("!define SETUP_MANIFEST_FILE \"" + manifest + "\"", current[19].GetString());
+        Assert.AreEqual("!define SETUP_MANIFEST_SHA256 \"" + new string('E', 64) + "\"", current[20].GetString());
+        string build = File.ReadAllText(f.BuildScript);
+        int exportHash = build.IndexOf("$uninstallerHash = Sha $uninstaller", StringComparison.Ordinal);
+        int manifestWrite = build.IndexOf("New-SetupManifestJson $version", StringComparison.Ordinal);
+        int manifestHash = build.IndexOf("$manifestHash = Sha $manifestFile", StringComparison.Ordinal);
+        int importPass = build.IndexOf("New-SetupCompilerArguments 'IMPORT_UNINST'", StringComparison.Ordinal);
+        Assert.IsTrue(exportHash >= 0 && manifestWrite > exportHash && manifestHash > manifestWrite && importPass > manifestHash);
+    }
+
+    [TestMethod]
+    public async Task Wrapper_export_and_import_compile_only_with_synthetic_payloads()
+    {
+        string? nsisRoot = Environment.GetEnvironmentVariable("GITHUBBACKUP_NSIS_ROOT");
+        if (string.IsNullOrWhiteSpace(nsisRoot) || !File.Exists(Path.Combine(nsisRoot, "makensis.exe")))
+            Assert.Inconclusive("Set GITHUBBACKUP_NSIS_ROOT to an already verified portable NSIS 3.12 folder.");
+        using var f = new SetupFixture();
+        f.WriteMinimalPayload();
+        f.WriteDirectory(f.Work);
+        f.WriteDirectory(f.Output);
+        f.WriteDirectory(Path.Combine(f.Work, "temp"));
+        f.WriteDirectory(Path.Combine(f.Work, "appdata"));
+        string notice = Path.Combine(f.Work, "NOTICE.txt");
+        f.WriteFile(notice, Encoding.UTF8.GetBytes("synthetic wrapper notice"));
+        string wrapper = Path.Combine(f.Work, "WrapperFixture.nsi");
+        string source = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
+        AssertManagedLifecycleDelegation(source);
+        // Compile the unchanged production source with inert payloads. Never run its EXEs.
+        f.WriteFile(wrapper, File.ReadAllBytes(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi")));
+        Assert.AreEqual(source, File.ReadAllText(wrapper));
+        f.WriteFile(Path.Combine(f.Work, "SetupGuards.nsh"),
+            File.ReadAllBytes(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh")));
+        var result = await RunPowerShellAsync("-CommandWithArgs", """
+            $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
+            foreach($name in @('Fail','SafePath','UninstallerPeInfo','New-SetupCompilerArguments','Invoke-NsisCompilePass','New-SetupIncludeLines','New-SetupManifestJson')){
+                $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+                if(-not $fn){throw "FUNCTION_MISSING_$name"}
+                . ([ScriptBlock]::Create($fn.Extent.Text))
+            }
+            $product=Import-PowerShellDataFile -LiteralPath $args[7]
+            $inputFile=Join-Path $args[4] 'SetupInputs.nsh'
+            $uninstaller=Join-Path $args[4] 'Uninstall.exe'
+            $export=Join-Path $args[4] 'UninstallerExport.exe'
+            $manifest=Join-Path $args[4] 'SetupManifest.json'
+            $output=Join-Path $args[8] 'GitHubBackup-setup.exe'
+            $appHash=(Get-FileHash -LiteralPath $args[5] -Algorithm SHA256).Hash
+            $noticeHash=(Get-FileHash -LiteralPath $args[6] -Algorithm SHA256).Hash
+            $lines=@(New-SetupIncludeLines $args[5] $args[6] $output '1.2.3.4' $appHash ('b'*40) $product $noticeHash 'internal-unsigned' $uninstaller '' $export)
+            [IO.File]::WriteAllLines($inputFile,$lines,[Text.UTF8Encoding]::new($false))
+            $exportArgs=@(New-SetupCompilerArguments 'EXPORT_UNINST' $inputFile $args[3])
+            Invoke-NsisCompilePass $args[1] $args[2] $args[4] $exportArgs 'SETUP_UNINSTALLER_EXPORT_FAILED'
+            UninstallerPeInfo $uninstaller
+            $uninstallerHash=(Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash
+            $manifestJson=New-SetupManifestJson '1.2.3.4' ('b'*40) $appHash $uninstallerHash $noticeHash
+            [IO.File]::WriteAllText($manifest,$manifestJson,[Text.UTF8Encoding]::new($false))
+            $manifestHash=(Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash
+            $lines=@(New-SetupIncludeLines $args[5] $args[6] $output '1.2.3.4' $appHash ('b'*40) $product $noticeHash 'internal-unsigned' $uninstaller $uninstallerHash $export $manifest $manifestHash)
+            [IO.File]::WriteAllLines($inputFile,$lines,[Text.UTF8Encoding]::new($false))
+            $importArgs=@(New-SetupCompilerArguments 'IMPORT_UNINST' $inputFile $args[3])
+            Invoke-NsisCompilePass $args[1] $args[2] $args[4] $importArgs 'SETUP_COMPILER_FAILED'
+            if(-not [IO.File]::Exists($output)){throw 'SYNTHETIC_WRAPPER_OUTPUT_MISSING'}
+            if((Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash -cne $uninstallerHash){throw 'SYNTHETIC_UNINSTALLER_CHANGED'}
+            if((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -cne $manifestHash){throw 'SYNTHETIC_MANIFEST_CHANGED'}
+            [pscustomobject]@{Status='PASS';UninstallerSha256=$uninstallerHash;ManifestSha256=$manifestHash} | ConvertTo-Json -Compress
+            """, f.BuildScript, Path.Combine(nsisRoot, "makensis.exe"), nsisRoot, wrapper, f.Work,
+            Path.Combine(f.Payload, "GitHubBackup.exe"), notice, f.Contract, f.Output);
+        foreach (string name in new[] { "SetupInputs.nsh", "Uninstall.exe", "UninstallerExport.exe", "SetupManifest.json" })
+        {
+            string path = Path.Combine(f.Work, name);
+            if (File.Exists(path)) f.AdoptGeneratedFile(path);
+        }
+        string output = Path.Combine(f.Output, "GitHubBackup-setup.exe");
+        if (File.Exists(output)) f.AdoptGeneratedFile(output);
+        Assert.AreEqual(0, result.ExitCode, result.Stderr + result.Stdout);
+        StringAssert.Contains(result.Stdout, "\"Status\":\"PASS\"");
+    }
+
+    [TestMethod]
+    [DataRow(true, 0)]
+    [DataRow(false, 0)]
+    [DataRow(true, 10)]
+    [DataRow(true, 11)]
+    [DataRow(true, 13)]
+    [DataRow(false, 13)]
+    public async Task Shared_wrapper_functions_protect_scratch_restore_environment_and_clean_up_with_a_fake_engine(bool existingBundleVariable, int engineExit)
+    {
+        string? nsisRoot = Environment.GetEnvironmentVariable("GITHUBBACKUP_NSIS_ROOT");
+        if (string.IsNullOrWhiteSpace(nsisRoot) || !File.Exists(Path.Combine(nsisRoot, "makensis.exe")))
+            Assert.Inconclusive("Set GITHUBBACKUP_NSIS_ROOT to an already verified portable NSIS 3.12 folder.");
+        using var f = new SetupFixture();
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        var user = identity.User!;
+        // Create a new private sandbox with explicit owner/permissions instead
+        // of changing the enclosing fixture's inherited owner or permissions.
+        string runtimeRoot = Path.Combine(f.Root, "runtime");
+        GitHubBackup.App.AclPolicy.CreateRestrictedDirectory(runtimeRoot, user, requireNew: true);
+        f.AdoptGeneratedDirectory(runtimeRoot);
+        f.WriteDirectory(f.Work);
+        f.WriteDirectory(Path.Combine(f.Work, "temp"));
+        f.WriteDirectory(Path.Combine(f.Work, "appdata"));
+        string launchTemp = Path.Combine(runtimeRoot, "launch-temp");
+        string launchAppData = Path.Combine(runtimeRoot, "launch-appdata");
+        f.WriteDirectory(launchTemp);
+        f.WriteDirectory(launchAppData);
+        string originalBundle = existingBundleVariable ? Path.Combine(runtimeRoot, "previous-bundle-base") : "";
+        string wrapperSource = File.ReadAllText(Path.Combine(RepoRoot(), "publish", "Setup", "GitHubBackup.nsi"));
+        string macros = ExtractWrapperMacro(wrapperSource, "SetupWrapperFunctions") + "\n\n" + ExtractWrapperMacro(wrapperSource, "RunSetupEngine") + "\n";
+        f.WriteFile(Path.Combine(f.Work, "WrapperMacros.nsh"), Encoding.UTF8.GetBytes(macros));
+        Assert.AreEqual(macros, File.ReadAllText(Path.Combine(f.Work, "WrapperMacros.nsh")));
+        f.WriteFile(Path.Combine(f.Work, "SetupGuards.nsh"), File.ReadAllBytes(Path.Combine(RepoRoot(), "publish", "Setup", "SetupGuards.nsh")));
+        foreach (string name in new[] { "SetupWrapperHarness.nsi", "SetupWrapperFakeEngine.nsi" })
+        {
+            byte[] source = File.ReadAllBytes(Path.Combine(RepoRoot(), "tests", "GitHubBackup.App.Tests", "Fixtures", name));
+            Assert.IsFalse(Encoding.UTF8.GetString(source).Contains("--setup-", StringComparison.Ordinal));
+            Assert.IsFalse(Encoding.UTF8.GetString(source).Contains("Call ValidateHost", StringComparison.Ordinal));
+            f.WriteFile(Path.Combine(f.Work, name), source);
+        }
+        string engine = Path.Combine(f.Work, "FakeEngine.exe");
+        string harness = Path.Combine(f.Work, "WrapperHarness.exe");
+        string inputFile = Path.Combine(f.Work, "SetupInputs.nsh");
+        var compile = await RunPowerShellAsync("-CommandWithArgs", """
+            $ast=[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$null)
+            foreach($name in @('Fail','SafePath','New-SetupIncludeLines','Invoke-NsisCompilePass')){
+                $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+                if(-not $fn){throw "FUNCTION_MISSING_$name"}
+                . ([ScriptBlock]::Create($fn.Extent.Text))
+            }
+            $product=Import-PowerShellDataFile -LiteralPath $args[3]
+            $lines=@(New-SetupIncludeLines 'unused' 'unused' 'unused' '0.0.0.0' ('A'*64) ('b'*40) $product ('C'*64) 'internal-unsigned' 'unused' ('D'*64) 'unused')
+            $lines+=('!define WRAPPER_FIXTURE_ROOT "{0}"' -f $args[5])
+            $lines+=('!define WRAPPER_ENGINE_FILE "{0}"' -f $args[6])
+            $lines+=('!define WRAPPER_HARNESS_OUTPUT "{0}"' -f $args[7])
+            $lines+=('!define WRAPPER_INITIAL_BUNDLE "{0}"' -f $args[8])
+            $lines+=('!define WRAPPER_ENGINE_EXIT {0}' -f $args[10])
+            [IO.File]::WriteAllLines($args[4],$lines,[Text.UTF8Encoding]::new($false))
+            Invoke-NsisCompilePass $args[1] $args[2] $args[9] @('/NOCONFIG','/V3',(Join-Path $args[9] 'SetupWrapperFakeEngine.nsi')) 'SETUP_FAKE_ENGINE_COMPILE_FAILED'
+            Invoke-NsisCompilePass $args[1] $args[2] $args[9] @('/NOCONFIG','/V3',(Join-Path $args[9] 'SetupWrapperHarness.nsi')) 'SETUP_WRAPPER_HARNESS_COMPILE_FAILED'
+            """, f.BuildScript, Path.Combine(nsisRoot, "makensis.exe"), nsisRoot, f.Contract,
+            inputFile, runtimeRoot, engine, harness, originalBundle, f.Work, engineExit.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach (string path in new[] { inputFile, engine, harness })
+            if (File.Exists(path)) f.AdoptGeneratedFile(path);
+        Assert.AreEqual(0, compile.ExitCode, compile.Stderr + compile.Stdout);
+
+        var start = new ProcessStartInfo(harness) { UseShellExecute = false, CreateNoWindow = true };
+        start.Environment["TEMP"] = launchTemp;
+        start.Environment["TMP"] = launchTemp;
+        start.Environment["APPDATA"] = launchAppData;
+        if (existingBundleVariable) start.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = originalBundle;
+        else start.Environment.Remove("DOTNET_BUNDLE_EXTRACT_BASE_DIR");
+        string? parentBundle = Environment.GetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR");
+        using var process = Process.Start(start)!;
+        string ready = Path.Combine(runtimeRoot, "engine-ready.flag");
+        string release = Path.Combine(runtimeRoot, "release-engine.flag");
+        string wrapperResult = Path.Combine(runtimeRoot, "wrapper-result.ini");
+        string engineResult = Path.Combine(runtimeRoot, "engine-result.ini");
+        try
+        {
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(ready) && !process.HasExited && deadline.Elapsed < TimeSpan.FromSeconds(10))
+                await Task.Delay(25);
+            Assert.IsTrue(File.Exists(ready), "The isolated fake engine did not become ready.");
+            string plugin = ReadFixtureIni(wrapperResult, "PluginPath");
+            Assert.IsTrue(plugin.StartsWith(launchTemp + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+            using (var directory = GitHubBackup.App.NativeFileSystem.Open(plugin))
+            {
+                GitHubBackup.App.NativeFileSystem.Inspect(directory, plugin, true);
+                GitHubBackup.App.AclPolicy.VerifyRestricted(directory, user);
+                Assert.AreEqual(user, GitHubBackup.App.NativeFileSystem.ReadSecurity(directory).Owner);
+            }
+            Assert.AreEqual(Path.Combine(plugin, ".net"), ReadFixtureIni(engineResult, "BundleBase"));
+            Assert.AreEqual(launchTemp, ReadFixtureIni(engineResult, "Temp"));
+            StringAssert.Contains(ReadFixtureIni(engineResult, "CommandLine"), "--wrapper-fixture");
+            Assert.IsTrue(File.Exists(Path.Combine(plugin, ".net", "synthetic-runtime.bin")));
+            f.WriteFile(release, "release"u8.ToArray());
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await process.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(engineExit, process.ExitCode, "The wrapper must preserve the engine's nonzero failure code.");
+            Assert.AreEqual(engineExit == 0 ? "PASS" : "FAIL", ReadFixtureIni(wrapperResult, "Status"));
+            Assert.AreEqual("0", ReadFixtureIni(wrapperResult, "PluginHandle"));
+            Assert.AreEqual(originalBundle, ReadFixtureIni(wrapperResult, "RestoredBundleBase"));
+            Assert.IsFalse(Directory.Exists(plugin), "NSIS must remove its own plugin directory after the engine exits.");
+            Assert.IsEmpty(Directory.EnumerateFileSystemEntries(launchTemp));
+            Assert.AreEqual(parentBundle, Environment.GetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR"));
+        }
+        finally
+        {
+            // Release only the test handshake. Never kill a hung installer as cleanup.
+            if (!File.Exists(release)) f.WriteFile(release, "release"u8.ToArray());
+            if (!process.HasExited)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await process.WaitForExitAsync(timeout.Token);
+            }
+            foreach (string path in new[] { ready, wrapperResult, engineResult })
+                if (File.Exists(path)) f.AdoptGeneratedFile(path);
+            foreach (string directory in Directory.EnumerateDirectories(launchTemp, "ns*.tmp"))
+                if (!Directory.EnumerateFileSystemEntries(directory).Any()) f.AdoptGeneratedDirectory(directory);
+        }
+    }
+
+    private static string ExtractWrapperMacro(string source, string name)
+    {
+        int start = source.IndexOf("!macro " + name + " ", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, start);
+        int end = source.IndexOf("!macroend", start, StringComparison.Ordinal);
+        Assert.IsGreaterThan(start, end);
+        return source[start..(end + "!macroend".Length)];
+    }
+
+    private static string ReadFixtureIni(string file, string key) =>
+        File.ReadAllLines(file).FirstOrDefault(line => line.StartsWith(key + "=", StringComparison.Ordinal))?[(key.Length + 1)..] ?? "";
 
     [TestMethod]
     public async Task Tool_stage_copies_locked_components_and_uses_only_staged_bytes()

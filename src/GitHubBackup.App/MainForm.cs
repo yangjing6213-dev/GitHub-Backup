@@ -4,6 +4,7 @@ internal enum CloseChoice { ContinueRunning, CancelAndWait }
 
 public partial class MainForm : Form
 {
+    private const string DeviceLoginUrl = "https://github.com/login/device";
     private readonly DesktopActions actions;
     private bool loading = true, busy, ready, cancelling, awaitingClose;
     private CancellationTokenSource? cancellation;
@@ -327,7 +328,7 @@ public partial class MainForm : Form
         if (!confirmed || busy || HasPendingCleanup) return Task.CompletedTask;
         return OperateAsync(async token =>
         {
-            ready = false; authSafetyError = null; StatusLabel.Text = "请在浏览器中完成 GitHub 登录。";
+            ready = false; authSafetyError = null; StatusLabel.Text = "正在启动 GitHub 浏览器登录…";
             bool acceptingCode = true;
             var loginLine = new System.Text.StringBuilder(100);
             bool discardLine = false;
@@ -343,7 +344,11 @@ public partial class MainForm : Form
                             if (!discardLine)
                             {
                                 var match = System.Text.RegularExpressions.Regex.Match(loginLine.ToString().Trim(), @"^! First copy your one-time code: ([A-Z0-9]{4}-[A-Z0-9]{4})$");
-                                if (match.Success) ProgressLabel.Text = "在 GitHub 浏览器页面输入一次性代码：" + match.Groups[1].Value;
+                                if (match.Success)
+                                {
+                                    ProgressLabel.Text = "在 GitHub 浏览器页面输入一次性代码：" + match.Groups[1].Value;
+                                    StatusLabel.Text = "GitHub 登录页通常会自动打开；如果没有打开，请手动访问 " + DeviceLoginUrl + "，再输入当前界面显示的一次性代码。";
+                                }
                             }
                             loginLine.Clear(); discardLine = false;
                         }
@@ -351,7 +356,10 @@ public partial class MainForm : Form
                         else discardLine = true;
                     }
                 }), token);
-                StatusLabel.Text = result.AuthReady ? "登录完成，共享账号可能已更新；请确认账号并重新检查环境。" : ErrorText(result.ErrorCode);
+                string status = result.AuthReady ? "登录完成，共享账号可能已更新；请确认账号并重新检查环境。" : ErrorText(result.ErrorCode);
+                if (result.BrowserOpenFailed)
+                    status += " 浏览器未能自动打开。如需重试，请再次点击“浏览器登录”，再手动访问 " + DeviceLoginUrl + " 并输入新显示的一次性代码。";
+                StatusLabel.Text = status;
             }
             finally { acceptingCode = false; loginLine.Clear(); ProgressLabel.Text = "登录操作已结束。"; }
         });

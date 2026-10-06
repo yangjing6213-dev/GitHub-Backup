@@ -2,11 +2,13 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace GitHubBackup.App;
 internal sealed record AuthResult(bool AuthReady, string Login, string ErrorCode)
 {
     internal NetworkCheckResult? NetworkFailure { get; init; }
+    internal bool BrowserOpenFailed { get; init; }
 }
 internal sealed class AuthCleanupException(AuthResult outcome, GitRuntimeCleanupException cleanup) : IOException(outcome.ErrorCode)
 {
@@ -15,8 +17,10 @@ internal sealed class AuthCleanupException(AuthResult outcome, GitRuntimeCleanup
 }
 internal interface ICredentialStore { void Probe(); HashSet<string> PerUserTargets(); }
 internal sealed class AuthService(AppPaths paths, IProcessRunner runner, ICredentialStore store,
-    Func<OperationJob,CancellationToken,Task<ToolInventory>> detectTools)
+    Func<OperationJob,CancellationToken,Task<ToolInventory>> detectTools, Action<string>? openDeviceLoginBrowser = null)
 {
+    internal const string DeviceLoginUrl = "https://github.com/login/device";
+
     internal AuthService(AppPaths paths, IProcessRunner runner, Func<OperationJob,CancellationToken,Task<ToolInventory>> detectTools)
         : this(paths, runner, new WindowsCredentialStore(), detectTools) { }
     internal AuthConfigLease AcquireConfig()
@@ -65,6 +69,7 @@ internal sealed class AuthService(AppPaths paths, IProcessRunner runner, ICreden
         if (tools.GitHubCli is not { IsSupported: true } gh) return Failure("AUTH_TOOL_UNAVAILABLE");
         HashSet<string>? before = null; bool launched = false, refreshed = false; AuthResult outcome;
         AuthConfigLease? lease = null; GitRuntimeCleanupException? cleanup = null;
+        using var codeProgress = new DeviceCodeProgress(ephemeralUiProgress, openDeviceLoginBrowser ?? OpenDeviceLoginPage);
         try
         {
             lease = new AuthConfigLease(paths, create: true);
@@ -78,7 +83,7 @@ internal sealed class AuthService(AppPaths paths, IProcessRunner runner, ICreden
             {
                 launched = true;
                 result = await runner.RunAsync(new(gh.AbsolutePath, ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"],
-                    working, environment, TimeSpan.FromMinutes(10), ProcessOutputMode.EphemeralText, ExpectedExecutableIdentity: gh.Identity), job, ephemeralUiProgress, cancellationToken).ConfigureAwait(false);
+                    working, environment, TimeSpan.FromMinutes(10), ProcessOutputMode.EphemeralText, ExpectedExecutableIdentity: gh.Identity), job, codeProgress, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -129,9 +134,72 @@ internal sealed class AuthService(AppPaths paths, IProcessRunner runner, ICreden
             catch (GitRuntimeCleanupException ex) { cleanup = ex; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or System.ComponentModel.Win32Exception) { outcome = Failure("AUTH_TOOL_REDETECTION_FAILED"); }
         }
-        if (cleanup is not null) throw new AuthCleanupException(outcome with { AuthReady = false, Login = "" }, cleanup);
-        return outcome.AuthReady ? outcome with { ErrorCode = "AUTH_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED" } : outcome;
+        if (cleanup is not null) throw new AuthCleanupException(outcome with { AuthReady = false, Login = "", BrowserOpenFailed = codeProgress.BrowserOpenFailed }, cleanup);
+        if (outcome.AuthReady) outcome = outcome with { ErrorCode = "AUTH_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED" };
+        return codeProgress.BrowserOpenFailed ? outcome with { BrowserOpenFailed = true } : outcome;
     }
+
+    private static void OpenDeviceLoginPage(string url)
+    {
+        if (!string.Equals(url, DeviceLoginUrl, StringComparison.Ordinal)) throw new InvalidOperationException("AUTH_BROWSER_URL_REJECTED");
+        using Process? browser = Process.Start(new ProcessStartInfo(DeviceLoginUrl) { UseShellExecute = true });
+        if (browser is null) throw new InvalidOperationException("AUTH_BROWSER_OPEN_FAILED");
+    }
+
+    private sealed class DeviceCodeProgress(IProgress<string>? uiProgress, Action<string> openBrowser) : IProgress<string>, IDisposable
+    {
+        private const string Prompt = "! First copy your one-time code: ";
+        private readonly StringBuilder line = new();
+        private bool discardLine;
+        private int openAttempted;
+        private int openFailed;
+        internal bool BrowserOpenFailed => Volatile.Read(ref openFailed) != 0;
+
+        public void Report(string value)
+        {
+            uiProgress?.Report(value);
+            foreach (char character in value)
+            {
+                if (character is '\r' or '\n')
+                {
+                    if (!discardLine && IsDeviceCodePrompt(line.ToString())) OpenOnce();
+                    line.Clear(); discardLine = false;
+                }
+                else if (!discardLine)
+                {
+                    if (line.Length < 100) line.Append(character);
+                    else { line.Clear(); discardLine = true; }
+                }
+            }
+        }
+
+        private void OpenOnce()
+        {
+            if (Interlocked.Exchange(ref openAttempted, 1) != 0) return;
+            try { openBrowser(DeviceLoginUrl); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+                or InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException
+                or System.Security.SecurityException)
+            { Interlocked.Exchange(ref openFailed, 1); }
+        }
+
+        private static bool IsDeviceCodePrompt(ReadOnlySpan<char> line)
+        {
+            line = line.Trim();
+            if (!line.StartsWith(Prompt, StringComparison.Ordinal) || line.Length != Prompt.Length + 9) return false;
+            ReadOnlySpan<char> code = line[Prompt.Length..];
+            for (int index = 0; index < code.Length; index++)
+            {
+                char current = code[index];
+                bool valid = index == 4 ? current == '-' : current is >= 'A' and <= 'Z' or >= '0' and <= '9';
+                if (!valid) return false;
+            }
+            return true;
+        }
+
+        public void Dispose() => line.Clear();
+    }
+
     private async Task<AuthResult> CheckCore(ToolDetection gh, AuthConfigLease lease, IReadOnlyDictionary<string,string?> child, OperationJob job, CancellationToken token)
     {
         byte[] status = await Capture(gh, ["auth", "status", "--active", "--hostname", "github.com", "--json", "hosts"], "AUTH_STATUS", lease, child, job, token).ConfigureAwait(false);

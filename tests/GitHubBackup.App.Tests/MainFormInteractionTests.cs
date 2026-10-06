@@ -8,6 +8,18 @@ namespace GitHubBackup.App.Tests;
 public sealed class MainFormInteractionTests
 {
     [TestMethod]
+    public void Initial_window_view_stays_at_top_and_does_not_focus_live_log() => UiTest.Run(async () =>
+    {
+        var fixture = new UiFixture(); using var form = new MainForm(fixture.Actions);
+        form.Show();
+        await form.CurrentOperation;
+        Application.DoEvents();
+
+        Assert.IsFalse(form.LiveLogTextBox.ContainsFocus, "The read-only live log should not receive initial focus.");
+        Assert.AreEqual(0, form.AutoScrollPosition.Y, "The initial view should show the first content, not the bottom of the form.");
+    });
+
+    [TestMethod]
     [DataRow("AUTH_KEYRING_TARGET_MISSING", "条目缺失")]
     [DataRow("AUTH_KEYRING_ENUMERATION_FAILED", "无法确认")]
     public void Auth_postcondition_warning_survives_workflow_cleanup_failure_and_retry(string code, string message) => UiTest.Run(async () =>
@@ -298,15 +310,21 @@ public sealed class MainFormInteractionTests
         {
             progress.Report("Authorization SECRET https://evil/?token=SECRET\n");
             progress.Report("! First copy your one-time code: ABCD-1234\n");
-            entered.SetResult(); await release.Task; return new(false, "", "AUTH_LOGIN_FAILED_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED");
+            entered.SetResult(); await release.Task; return new(false, "", "AUTH_LOGIN_FAILED_SHARED_ACTIVE_SLOT_MAY_HAVE_CHANGED") { BrowserOpenFailed = true };
         } };
         using var form = new MainForm(actions); await form.LoadSettingsAsync();
         await form.LoginConfirmedAsync(false); Assert.IsFalse(entered.Task.IsCompleted);
         var login = form.LoginConfirmedAsync(true); await entered.Task; await Task.Yield();
         Assert.Contains("ABCD-1234", form.ProgressLabel.Text); Assert.DoesNotContain("SECRET", form.ProgressLabel.Text);
+        Assert.Contains("通常会自动打开", form.StatusLabel.Text);
+        Assert.Contains("https://github.com/login/device", form.StatusLabel.Text);
+        Assert.Contains("当前界面显示", form.StatusLabel.Text);
+        Assert.DoesNotContain("ABCD-1234", form.StatusLabel.Text);
         release.SetResult(); await login;
         Assert.DoesNotContain("ABCD-1234", form.ProgressLabel.Text);
         Assert.Contains("共享", form.StatusLabel.Text);
+        Assert.Contains("https://github.com/login/device", form.StatusLabel.Text);
+        Assert.Contains("新显示的一次性代码", form.StatusLabel.Text);
     });
 
     [TestMethod]

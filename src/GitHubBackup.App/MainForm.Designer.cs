@@ -65,7 +65,7 @@ partial class MainForm
         ProgressLabel.AutoSize = true; ProgressLabel.MaximumSize = new Size(720, 0); ProgressLabel.Text = "尚未开始备份。"; Add(ProgressLabel);
         ActivityBar.Dock = DockStyle.Top; ActivityBar.AccessibleName = "当前操作活动状态"; Add(ActivityBar);
         Add(new Label { Text = "实时脱敏日志（最多保留末尾 2,000 行）", AutoSize = true });
-        LiveLogTextBox.Multiline = true; LiveLogTextBox.ReadOnly = true; LiveLogTextBox.WordWrap = false;
+        LiveLogTextBox.Multiline = true; LiveLogTextBox.ReadOnly = true; LiveLogTextBox.WordWrap = false; LiveLogTextBox.TabStop = false;
         LiveLogTextBox.ScrollBars = ScrollBars.Both; LiveLogTextBox.Dock = DockStyle.Top; LiveLogTextBox.Height = 160;
         LiveLogTextBox.AccessibleName = "实时脱敏日志"; LiveLogTextBox.BackColor = SystemColors.Window; LiveLogTextBox.ForeColor = SystemColors.WindowText; Add(LiveLogTextBox);
         Controls.Add(layout);

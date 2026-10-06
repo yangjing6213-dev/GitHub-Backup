@@ -197,8 +197,8 @@ public sealed class SetupIsolationGateTests
     [TestMethod]
     public void Different_sid_cannot_use_current_users_profile_path()
     {
-        const string selected = @"S-1-5-21-100-200-300-1002|C:\Users\amene";
-        var record = ApprovedSyntheticRecord() with { Sid = "S-1-5-21-100-200-300-1002", Profile = @"C:\Users\amene" };
+        const string selected = @"S-1-5-21-100-200-300-1002|C:\Users\FixtureOwner";
+        var record = ApprovedSyntheticRecord() with { Sid = "S-1-5-21-100-200-300-1002", Profile = @"C:\Users\FixtureOwner" };
         var error = Assert.ThrowsExactly<AssertInconclusiveException>(() => SetupIsolationGate.Require(selected,
             () => record, () => (record.Sid, record.Profile), _ => null));
         StringAssert.Contains(error.Message, "SETUP_ISOLATED_REGISTERED_PROFILE_NOT_MATCHED");

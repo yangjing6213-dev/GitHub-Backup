@@ -70,9 +70,34 @@ function PeInfo([string]$file) {
         if ($machine -ne $contract.NativeMachine -or $magic -ne 0x20B -or $subsystem -ne 2) { Fail 'SETUP_PAYLOAD_PE_INVALID' }
     } finally { $stream.Dispose() }
 }
+function UninstallerPeInfo([string]$file) {
+    if (-not [IO.File]::Exists($file)) { Fail 'SETUP_UNINSTALLER_FILE_INVALID' }
+    $attributes = [IO.File]::GetAttributes($file)
+    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+        ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { Fail 'SETUP_UNINSTALLER_FILE_INVALID' }
+    $stream = [IO.File]::OpenRead($file)
+    try {
+        $reader = [IO.BinaryReader]::new($stream)
+        if ($stream.Length -lt 256 -or $reader.ReadUInt16() -ne 0x5A4D) { Fail 'SETUP_UNINSTALLER_PE_INVALID' }
+        $stream.Position = 0x3C
+        $offset = $reader.ReadInt32()
+        if ($offset -lt 0x40 -or $offset -gt $stream.Length - 94) { Fail 'SETUP_UNINSTALLER_PE_INVALID' }
+        $stream.Position = $offset
+        if ($reader.ReadUInt32() -ne 0x00004550) { Fail 'SETUP_UNINSTALLER_PE_INVALID' }
+        $machine = $reader.ReadUInt16()
+        $stream.Position = $offset + 24
+        $magic = $reader.ReadUInt16()
+        $stream.Position = $offset + 92
+        $subsystem = $reader.ReadUInt16()
+        $validPair = ($machine -eq 0x014C -and $magic -eq 0x010B) -or
+            ($machine -eq 0x8664 -and $magic -eq 0x020B)
+        if (-not $validPair -or $subsystem -ne 2) { Fail 'SETUP_UNINSTALLER_PE_INVALID' }
+    } finally { $stream.Dispose() }
+}
 function New-SetupIncludeLines([string]$stagedApp, [string]$stagedNotice, [string]$outputFile,
     [string]$version, [string]$appHash, [string]$sourceCommit, [hashtable]$productContract,
-    [string]$noticeHash, [string]$payloadKind) {
+    [string]$noticeHash, [string]$payloadKind, [string]$uninstallerFile, [string]$uninstallerHash,
+    [string]$exportOutputFile, [string]$manifestFile = '', [string]$manifestHash = '') {
     @(
         ('!define SETUP_APP_FILE "{0}"' -f $stagedApp)
         ('!define SETUP_NOTICE_FILE "{0}"' -f $stagedNotice)
@@ -86,11 +111,69 @@ function New-SetupIncludeLines([string]$stagedApp, [string]$stagedNotice, [strin
         ('!define SETUP_PRODUCT_ID "{0}"' -f $productContract.ProductId)
         ('!define SETUP_APP_NAME "{0}"' -f $productContract.AppFile)
         ('!define SETUP_UNINSTALLER_NAME "{0}"' -f $productContract.UninstallerFile)
+        ('!define SETUP_UNINSTALLER_FILE "{0}"' -f $uninstallerFile)
+        ('!define SETUP_UNINSTALLER_SHA256 "{0}"' -f $uninstallerHash)
+        ('!define SETUP_EXPORT_OUTPUT_FILE "{0}"' -f $exportOutputFile)
         ('!define SETUP_RECEIPT_NAME "{0}"' -f $productContract.ReceiptFile)
         ('!define SETUP_NOTICE_NAME "{0}"' -f $productContract.NoticeFile)
         ('!define SETUP_NOTICE_SHA256 "{0}"' -f $noticeHash)
         ('!define SETUP_PAYLOAD_KIND "{0}"' -f $payloadKind)
     )
+    if ($manifestFile -or $manifestHash) {
+        if ([string]::IsNullOrWhiteSpace($manifestFile) -or $manifestHash -cnotmatch '^[A-Fa-f0-9]{64}$') {
+            Fail 'SETUP_MANIFEST_INPUT_INVALID'
+        }
+        ('!define SETUP_MANIFEST_FILE "{0}"' -f $manifestFile)
+        ('!define SETUP_MANIFEST_SHA256 "{0}"' -f $manifestHash)
+    }
+}
+function New-SetupManifestJson([string]$version, [string]$sourceCommit, [string]$appHash,
+    [string]$uninstallerHash, [string]$noticeHash) {
+    return ([ordered]@{
+        Version = $version
+        SourceCommit = $sourceCommit
+        AppHash = $appHash
+        UninstallerHash = $uninstallerHash
+        NoticeHash = $noticeHash
+    } | ConvertTo-Json -Compress)
+}
+function New-SetupCompilerArguments([string]$mode, [string]$inputFile, [string]$scriptFile) {
+    if ($mode -cnotin @('EXPORT_UNINST', 'IMPORT_UNINST')) { Fail 'SETUP_COMPILER_MODE_INVALID' }
+    if ([string]::IsNullOrWhiteSpace($inputFile) -or [string]::IsNullOrWhiteSpace($scriptFile)) { Fail 'SETUP_COMPILER_ARGUMENTS_INVALID' }
+    return @('/NOCONFIG', '/V3', "/DSETUP_INPUTS=$inputFile", "/D$mode", $scriptFile)
+}
+function Invoke-NsisCompilePass([string]$compiler, [string]$nsisRoot,
+    [string]$workRoot, [string[]]$arguments, [string]$failureCode) {
+    $oldNsisDir = $env:NSISDIR
+    $oldNsisConfigDir = $env:NSISCONFDIR
+    $oldTemp = $env:TEMP
+    $oldTmp = $env:TMP
+    $oldAppData = $env:APPDATA
+    $pushed = $false
+    $isolatedTemp = Join-Path $workRoot 'temp'
+    $isolatedAppData = Join-Path $workRoot 'appdata'
+    try {
+        [IO.Directory]::CreateDirectory($isolatedTemp) | Out-Null
+        [IO.Directory]::CreateDirectory($isolatedAppData) | Out-Null
+        $null = SafePath $isolatedTemp $true
+        $null = SafePath $isolatedAppData $true
+        Push-Location -LiteralPath $workRoot
+        $pushed = $true
+        $env:NSISDIR = $nsisRoot
+        $env:NSISCONFDIR = $nsisRoot
+        $env:TEMP = $isolatedTemp
+        $env:TMP = $isolatedTemp
+        $env:APPDATA = $isolatedAppData
+        & $compiler @arguments
+        if ($LASTEXITCODE -ne 0) { Fail $failureCode }
+    } finally {
+        $env:NSISDIR = $oldNsisDir
+        $env:NSISCONFDIR = $oldNsisConfigDir
+        $env:TEMP = $oldTemp
+        $env:TMP = $oldTmp
+        $env:APPDATA = $oldAppData
+        if ($pushed) { Pop-Location }
+    }
 }
 function Copy-VerifiedToolTree([string]$sourceRoot, [string]$workRoot, [array]$entries) {
     $stagedRoot = Join-Path $workRoot 'nsis'
@@ -227,11 +310,12 @@ try {
         [pscustomobject]@{ Status='CHECK_ONLY_PASS'; PayloadSha256=$appHash; AppVersion=$version; SourceCommit=$input.sourceCommit; OutputFile=$outputFile }
         exit 0
     }
-    $script = Join-Path $PSScriptRoot 'GitHubBackup.nsi'
-    if (-not [IO.File]::Exists($script)) { Fail 'SETUP_INSTALLER_SOURCE_MISSING' }
+    $scriptSource = Join-Path $PSScriptRoot 'GitHubBackup.nsi'
+    $guardsSource = Join-Path $PSScriptRoot 'SetupGuards.nsh'
+    if (-not [IO.File]::Exists($scriptSource) -or -not [IO.File]::Exists($guardsSource)) { Fail 'SETUP_INSTALLER_SOURCE_MISSING' }
     $noticeSource = Join-Path $PSScriptRoot $contract.NoticeFile
     if ((Get-Content -LiteralPath $noticeSource -Raw -Encoding UTF8) -match 'PENDING_LICENSE') { Fail 'SETUP_LICENSE_PENDING' }
-    foreach ($path in @($work,$output,$script,$app,$compiler)) { if ($path -match '[\$!"`\x00-\x1f]') { Fail 'SETUP_PATH_UNREPRESENTABLE' } }
+    foreach ($path in @($work,$output,$scriptSource,$guardsSource,$app,$compiler)) { if ($path -match '[\$!"`%\x00-\x1f]') { Fail 'SETUP_PATH_UNREPRESENTABLE' } }
     [IO.Directory]::CreateDirectory($work) | Out-Null
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $stagedNsis = Copy-VerifiedToolTree $nsis $work $tool.files
@@ -243,22 +327,37 @@ try {
     $noticeHash = Sha $noticeSource
     [IO.File]::Copy($noticeSource,$stagedNotice)
     if ((Sha $stagedNotice) -cne $noticeHash) { Fail 'SETUP_STAGED_HASH_MISMATCH' }
+    $stagedScript = Join-Path $work 'GitHubBackup.nsi'
+    $stagedGuards = Join-Path $work 'SetupGuards.nsh'
+    [IO.File]::Copy($scriptSource,$stagedScript)
+    [IO.File]::Copy($guardsSource,$stagedGuards)
+    if ((Sha $stagedScript) -cne (Sha $scriptSource) -or (Sha $stagedGuards) -cne (Sha $guardsSource)) { Fail 'SETUP_STAGED_HASH_MISMATCH' }
+    $uninstallerFile = Join-Path $work $contract.UninstallerFile
+    $exportOutputFile = Join-Path $work 'UninstallerExport.exe'
+    if ($uninstallerFile -match '[\$!"`%\x00-\x1f]' -or $exportOutputFile -match '[\$!"`%\x00-\x1f]') { Fail 'SETUP_PATH_UNREPRESENTABLE' }
     $include = Join-Path $work 'SetupInputs.nsh'
-    $lines = @(New-SetupIncludeLines $stagedApp $stagedNotice $outputFile $version $appHash $input.sourceCommit $contract $noticeHash $input.payloadKind)
+    $lines = @(New-SetupIncludeLines $stagedApp $stagedNotice $outputFile $version $appHash $input.sourceCommit $contract $noticeHash $input.payloadKind $uninstallerFile '' $exportOutputFile)
     [IO.File]::WriteAllLines($include,$lines,[Text.UTF8Encoding]::new($false))
-    $oldNsisDir = $env:NSISDIR
-    $oldNsisConfigDir = $env:NSISCONFDIR
-    try {
-        $env:NSISDIR = $stagedNsis
-        $env:NSISCONFDIR = $stagedNsis
-        & $stagedCompiler /NOCONFIG /V3 "/DSETUP_INPUTS=$include" $script
-        if ($LASTEXITCODE -ne 0) { Fail 'SETUP_COMPILER_FAILED' }
-    } finally {
-        $env:NSISDIR = $oldNsisDir
-        $env:NSISCONFDIR = $oldNsisConfigDir
-    }
+    $exportArguments = @(New-SetupCompilerArguments 'EXPORT_UNINST' $include $stagedScript)
+    Invoke-NsisCompilePass $stagedCompiler $stagedNsis $work $exportArguments 'SETUP_UNINSTALLER_EXPORT_FAILED'
+    if (-not [IO.File]::Exists($exportOutputFile)) { Fail 'SETUP_UNINSTALLER_EXPORT_FAILED' }
+    $uninstaller = SafePath $uninstallerFile $true
+    UninstallerPeInfo $uninstaller
+    $uninstallerHash = Sha $uninstaller
+    if ($uninstallerHash -notmatch '^[A-F0-9]{64}$') { Fail 'SETUP_UNINSTALLER_EXPORT_FAILED' }
+    $manifestFile = Join-Path $work 'SetupManifest.json'
+    $manifestJson = New-SetupManifestJson $version $input.sourceCommit $appHash $uninstallerHash $noticeHash
+    [IO.File]::WriteAllText($manifestFile,$manifestJson,[Text.UTF8Encoding]::new($false))
+    $manifestHash = Sha $manifestFile
+    $lines = @(New-SetupIncludeLines $stagedApp $stagedNotice $outputFile $version $appHash $input.sourceCommit $contract $noticeHash $input.payloadKind $uninstaller $uninstallerHash $exportOutputFile $manifestFile $manifestHash)
+    [IO.File]::WriteAllLines($include,$lines,[Text.UTF8Encoding]::new($false))
+    if ((Sha $uninstaller) -cne $uninstallerHash) { Fail 'SETUP_UNINSTALLER_HASH_CHANGED' }
+    $importArguments = @(New-SetupCompilerArguments 'IMPORT_UNINST' $include $stagedScript)
+    Invoke-NsisCompilePass $stagedCompiler $stagedNsis $work $importArguments 'SETUP_COMPILER_FAILED'
+    if ((Sha $uninstaller) -cne $uninstallerHash) { Fail 'SETUP_UNINSTALLER_HASH_CHANGED' }
+    if ((Sha $manifestFile) -cne $manifestHash) { Fail 'SETUP_MANIFEST_HASH_CHANGED' }
     if (-not [IO.File]::Exists($outputFile)) { Fail 'SETUP_OUTPUT_MISSING' }
-    [pscustomobject]@{ Status='BUILT_UNVERIFIED'; PayloadSha256=$appHash; AppVersion=$version; SourceCommit=$input.sourceCommit; OutputFile=$outputFile }
+    [pscustomobject]@{ Status='BUILT_UNVERIFIED'; PayloadSha256=$appHash; UninstallerSha256=$uninstallerHash; AppVersion=$version; SourceCommit=$input.sourceCommit; OutputFile=$outputFile }
 } catch {
     $code = [string]$_.Exception.Message
     if ($code -notmatch '^SETUP_[A-Z_]+$') { $code = 'SETUP_UNEXPECTED_ERROR' }
