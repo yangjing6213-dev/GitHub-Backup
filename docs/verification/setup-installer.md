@@ -4,7 +4,7 @@ This document is a public summary, not the original machine/account diagnostic l
 
 ## Current follow-up status — 2026-10-07
 
-This section supersedes the historical snapshots below for the current local v4 build. The package has been installed on the development PC; public release status is separate and must be checked on GitHub.
+This section supersedes the historical snapshots below for the current v4 build. The unsigned preview is published as [setup-preview-20261007-v4](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4), with the installer and a separate checksum file.
 
 - Installer artifact: `GitHubBackup-setup.exe`, 93,293,246 bytes, SHA-256 `937DDD6E89C1A72CD1C36766591B3AFEF2297DD316DC439DEE69F3050B1C751F`.
 - Bundled app: self-contained Windows x64 executable, SHA-256 `99571B5DD8C42CDE84475E3001D440895F43925E981A96652DD077908939BD08`. Installer and app static verification: PASS. The installer is unsigned.
