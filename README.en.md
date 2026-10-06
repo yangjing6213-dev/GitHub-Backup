@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **You made something with AI. Keep a local copy, too.** This Windows app helps save your own GitHub projects and version history to your computer, without making command-line steps your starting point.
+> **You made something with AI. Keep a local copy, too.** If your GitHub account is suspended or inaccessible, you may not be able to retrieve the projects stored there. Back up your own repositories and version history while you still have access to reduce the risk of losing them.
 >
 > [Download the Windows v4 preview](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4) · [Quick start](#6-installation-and-quick-start) · [About the author](#13-about-the-author)
+>
+> **Back up in advance:** this app cannot restore account access or retrieve files from an account you can no longer access.
 
 If you use AI to build a website, tool, or small app and keep it in your own GitHub account, this app can save its code, version history, and supported project records locally.
 
