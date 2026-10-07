@@ -1,4 +1,5 @@
 using System.Security.Principal;
+using System.Text.Json;
 
 namespace GitHubBackup.App;
 
@@ -99,7 +100,10 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         private readonly string runId = RunIdFactory.Create(TimeProvider.System);
         private readonly DateTimeOffset started = DateTimeOffset.UtcNow;
         private readonly ManifestStore manifests = new();
+        private readonly BackupCheckpointStore checkpoints = new();
         private readonly HashSet<string> failed = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> completedRepositories = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> resumedRepositories = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> failureDiagnosticCounts = new(StringComparer.Ordinal);
         private readonly List<AtomicFileCleanupException> ownedFiles = [];
         private OperationLockLease? owner;
@@ -108,6 +112,8 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         private string ownerRoot = "", manifest = "", log = "", phase = "preflight", error = "";
         private int repositoryCount, warnings, skipped;
         private bool cancelled, writesStarted, finalized, ownsMarker;
+        private bool rateLimitedStop;
+        private DateTimeOffset? rateLimitReset;
         private BackupSummary? summary;
         private NetworkCheckResult? networkFailure;
 
@@ -141,7 +147,8 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                     bindings.Add(await LegacyIdentityBinder.TryBindAsync(ownerRoot, old, session.Snapshot.Repositories, request.Settings.Owner,
                         new(Path.Combine(ownerRoot, "metadata", old.LocalName, "repository.json")), token).ConfigureAwait(false));
                 var mappings = ManifestStore.Reconcile(ownerRoot, previous, session.Snapshot.Repositories, bindings);
-                context = BackupRunContext.Create(session, owner, mappings, runId);
+                context = BackupRunContext.Create(session, owner, mappings, runId,
+                    request.Settings.RepositoryScope, request.Settings.IncludeCollaboratorRepositories);
                 phase = "recovery";
                 await RecoverAsync().ConfigureAwait(false);
                 await RunningMarkerStore.RemoveCompletedAsync(owner, null, null, CancellationToken.None, paths).ConfigureAwait(false);
@@ -149,9 +156,27 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
 
                 var current = mappings.Where(r => r.RemoteState == "active").ToArray();
                 repositoryCount = current.Length;
+                try
+                {
+                    BackupCheckpoint? previousCheckpoint = await checkpoints.ReadAsync(ownerRoot, request.Settings.Owner, token).ConfigureAwait(false);
+                    if (previousCheckpoint is { PausedByRateLimit: true })
+                    {
+                        foreach (string name in previousCheckpoint.CompletedRepositories)
+                            if (current.Any(repository => string.Equals(repository.LocalName, name, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                resumedRepositories.Add(name);
+                                completedRepositories.Add(name);
+                            }
+                    }
+                }
+                catch (JsonException)
+                {
+                    // A damaged progress hint must never block a fresh backup.
+                }
                 var sizes = new Dictionary<long, long>();
                 var plans = new Dictionary<long, ReleasePlan>();
                 var releases = new ReleaseAssetService(transport);
+                var actions = new ActionsArchiveService();
                 long changed = 0;
                 phase = "planning";
                 progress?.Report(new(phase, null, 0, repositoryCount));
@@ -165,9 +190,10 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                     sizes.Add(repository.RepositoryId, size);
                     if (request.Mode == BackupMode.Full)
                     {
-                        var inventory = await releases.ReadInventoryAsync(request.Settings.Owner, repository.Name, token).ConfigureAwait(false);
+                        string repositoryOwner = RemoteOwner(repository);
+                        var inventory = await releases.ReadInventoryAsync(request.Settings.Owner, repositoryOwner, repository.Name, token).ConfigureAwait(false);
                         var plan = await releases.PlanAsync(Path.Combine(ownerRoot, "releases", repository.LocalName), request.Settings.Owner,
-                            repository.Name, inventory, token).ConfigureAwait(false);
+                            repositoryOwner, repository.Name, inventory, token).ConfigureAwait(false);
                         plans.Add(repository.RepositoryId, plan); changed = checked(changed + plan.ChangedBytes);
                     }
                 }
@@ -177,8 +203,9 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 token.ThrowIfCancellationRequested(); session.Revalidate();
                 phase = "initialize";
                 writesStarted = true;
-                foreach (string name in new[] { "manifests", "logs", "metadata", "mirrors", "wikis" }) CreateDirectory(Path.Combine(ownerRoot, name));
+                foreach (string name in new[] { "manifests", "logs", "metadata", "mirrors", "wikis", "progress" }) CreateDirectory(Path.Combine(ownerRoot, name));
                 if (request.Mode == BackupMode.Full) CreateDirectory(Path.Combine(ownerRoot, "releases"));
+                if (request.Settings.IncludeActionsArtifacts) CreateDirectory(Path.Combine(ownerRoot, "actions"));
                 manifest = await manifests.WriteAsync(ownerRoot, runId, mappings, token).ConfigureAwait(false);
                 await RunningMarkerStore.WriteAsync(owner, new(runId, request.Mode, request.Settings.Owner, started), token).ConfigureAwait(false);
                 ownsMarker = true;
@@ -186,6 +213,7 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 logger = await RunLogger.CreateAsync(log, token).ConfigureAwait(false);
                 await logger.WriteAsync(LogLevel.Info, "start", null, "BACKUP_STARTED", token).ConfigureAwait(false);
                 progress?.Report(new(phase, null, 0, repositoryCount, logger.GetTail()));
+                await SaveCheckpointAsync(current.Length, null, "planning", false, null, token).ConfigureAwait(false);
                 var backup = new RepositoryBackupService(runner, promotionBoundary);
                 long remaining = changed;
                 int currentIndex = 0;
@@ -193,6 +221,11 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 {
                     currentIndex++;
                     token.ThrowIfCancellationRequested(); session.Revalidate();
+                    if (resumedRepositories.Contains(repository.LocalName))
+                    {
+                        progress?.Report(new("mirror", repository.Name, currentIndex, repositoryCount, logger.GetTail()));
+                        continue;
+                    }
                     phase = "space"; RequireSpace(DiskSpacePolicy.RequiredForRepository(requirement, repository.RepositoryId, remaining));
                     using var repositoryLock = OperationLocks.AcquireRepository(owner, repository.LocalName, runId);
                     phase = "mirror";
@@ -220,8 +253,45 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                     foreach (string file in new[] { "repository.json", "issues.pages.json", "pull-requests.pages.json", "issue-comments.pages.json",
                         "review-comments.pages.json", "releases.pages.json", "labels.pages.json", "milestones.pages.json", "workflows.pages.json" })
                     {
-                        try { await pages.SaveMetadataAsync(request.Settings.Owner, repository.Name, file, transport, token).ConfigureAwait(false); }
-                        catch (Exception ex) when (IsItemFailure(ex)) { warnings++; RecordNetworkFailure(ex); await LogAsync(ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited } ? "HTTP_RATE_LIMITED" : "METADATA_BACKUP_FAILED", repository.LocalName).ConfigureAwait(false); }
+                        try { await pages.SaveMetadataAsync(request.Settings.Owner, RemoteOwner(repository), repository.Name, file, transport, token).ConfigureAwait(false); }
+                        catch (Exception ex) when (IsItemFailure(ex))
+                        {
+                            warnings++; RecordNetworkFailure(ex);
+                            bool limited = ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited };
+                            await LogAsync(limited ? "HTTP_RATE_LIMITED" : "METADATA_BACKUP_FAILED", repository.LocalName).ConfigureAwait(false);
+                            if (limited) { rateLimitedStop = true; break; }
+                        }
+                    }
+                    if (rateLimitedStop)
+                    {
+                        await SaveCheckpointAsync(current.Length, repository.LocalName, phase, true, rateLimitReset, CancellationToken.None).ConfigureAwait(false);
+                        break;
+                    }
+                    if (request.Settings.IncludeActionsArtifacts)
+                    {
+                        phase = "actions";
+                        progress?.Report(new(phase, repository.Name, currentIndex, repositoryCount, logger.GetTail()));
+                        try
+                        {
+                            ActionsBackupReport actionReport = await actions.SaveAsync(ownerRoot, request.Settings.Owner,
+                                RemoteOwner(repository), repository.Name, repository.LocalName, request.Settings.ActionsMaxBytes,
+                                transport, token).ConfigureAwait(false);
+                            warnings += actionReport.Warnings.Count;
+                            foreach (string warning in actionReport.Warnings.Distinct(StringComparer.Ordinal))
+                                await LogAsync(warning, repository.LocalName).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (IsItemFailure(ex))
+                        {
+                            warnings++; RecordNetworkFailure(ex);
+                            bool limited = ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited };
+                            await LogAsync(limited ? "HTTP_RATE_LIMITED" : "ACTIONS_BACKUP_FAILED", repository.LocalName).ConfigureAwait(false);
+                            if (limited) rateLimitedStop = true;
+                        }
+                    }
+                    if (rateLimitedStop)
+                    {
+                        await SaveCheckpointAsync(current.Length, repository.LocalName, phase, true, rateLimitReset, CancellationToken.None).ConfigureAwait(false);
+                        break;
                     }
                     if (request.Mode == BackupMode.Full)
                     {
@@ -235,9 +305,22 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                             await releases.CommitIndexAsync(plan, token, releaseCommitHooks).ConfigureAwait(false);
                         }
                         catch (ReleaseException ex) when (ex.Code == "BACKUP_INSUFFICIENT_FREE_SPACE") { throw; }
-                        catch (Exception ex) when (IsItemFailure(ex)) { warnings++; RecordNetworkFailure(ex); await LogAsync(ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited } ? "HTTP_RATE_LIMITED" : "RELEASE_BACKUP_FAILED", repository.LocalName).ConfigureAwait(false); }
+                        catch (Exception ex) when (IsItemFailure(ex))
+                        {
+                            warnings++; RecordNetworkFailure(ex);
+                            bool limited = ex is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited };
+                            await LogAsync(limited ? "HTTP_RATE_LIMITED" : "RELEASE_BACKUP_FAILED", repository.LocalName).ConfigureAwait(false);
+                            if (limited) rateLimitedStop = true;
+                        }
                         remaining -= plan.ChangedBytes;
                     }
+                    if (rateLimitedStop)
+                    {
+                        await SaveCheckpointAsync(current.Length, repository.LocalName, phase, true, rateLimitReset, CancellationToken.None).ConfigureAwait(false);
+                        break;
+                    }
+                    completedRepositories.Add(repository.LocalName);
+                    await SaveCheckpointAsync(current.Length, repository.LocalName, "repository-complete", false, null, token).ConfigureAwait(false);
                 }
                 token.ThrowIfCancellationRequested();
             }
@@ -259,7 +342,10 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         private void RecordNetworkFailure(Exception error)
         {
             if (error is HttpTransferException { FailureKind: NetworkFailureKind.RateLimited } limited)
+            {
+                rateLimitReset = limited.RateLimitReset;
                 networkFailure = new(false, NetworkFailureKind.RateLimited, limited.RateLimitReset, "HTTP_RATE_LIMITED");
+            }
         }
 
         private async Task RecordAsync(RepositoryDescriptor repository, RepositoryStepResult step)
@@ -283,6 +369,12 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
         }
         private static bool IsSafeDiagnosticCode(string code) => code.Length is > 0 and <= 80
             && code.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
+        private static string RemoteOwner(RepositoryDescriptor repository)
+        {
+            string[] parts = repository.NameWithOwner.Split('/');
+            if (parts.Length != 2 || !AuthConfigLease.IsLogin(parts[0])) throw new InvalidDataException("REPOSITORY_SUMMARY_INVALID");
+            return parts[0];
+        }
         private string MirrorFailureCode() => failureDiagnosticCounts.Count == 1
             ? failureDiagnosticCounts.Keys.Single() : "MIRROR_BACKUP_FAILED";
         private long FreeBytes() => availableBytes?.Invoke(request.Settings.BackupRoot)
@@ -296,11 +388,26 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
             await logger.WriteAsync(LogLevel.Warning, phase, repository, code, CancellationToken.None).ConfigureAwait(false);
             progress?.Report(new(phase, repository, 0, 0, logger.GetTail()));
         }
+        private async Task SaveCheckpointAsync(int totalRepositories, string? currentRepository, string checkpointPhase,
+            bool pausedByRateLimit, DateTimeOffset? reset, CancellationToken token)
+        {
+            try
+            {
+                await checkpoints.WriteAsync(ownerRoot, new(1, request.Settings.Owner, runId, DateTimeOffset.UtcNow,
+                    pausedByRateLimit, totalRepositories, completedRepositories.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                    currentRepository, checkpointPhase, reset), token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                warnings++;
+                await LogAsync("CHECKPOINT_WRITE_FAILED", currentRepository).ConfigureAwait(false);
+            }
+        }
         private static bool IsItemFailure(Exception ex) => ex is not AtomicFileCleanupException && ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception;
         private BackupSummary Summary() => new(2, request.Mode, started, DateTimeOffset.UtcNow,
             failed.Count != 0 ? RunStatus.Fail : cancelled ? RunStatus.Cancelled : error.Length != 0 ? RunStatus.Fail : warnings != 0 ? RunStatus.Partial : RunStatus.Pass,
             cancelled, request.Settings.Owner, runId, repositoryCount, warnings, failed.Order(StringComparer.OrdinalIgnoreCase).ToArray(), skipped,
-            error.Length != 0 ? phase : failed.Count != 0 ? "mirror" : "", error.Length != 0 ? error : failed.Count != 0 ? MirrorFailureCode() : "",
+            error.Length != 0 ? phase : rateLimitedStop ? phase : failed.Count != 0 ? "mirror" : "", error.Length != 0 ? error : rateLimitedStop ? "HTTP_RATE_LIMITED" : failed.Count != 0 ? MirrorFailureCode() : "",
             ownerRoot, manifest, log);
         private async Task RecoverAsync()
         {

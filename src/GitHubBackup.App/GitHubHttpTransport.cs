@@ -25,12 +25,25 @@ internal sealed class GitHubRequest
         if (!AuthConfigLease.IsLogin(owner)) throw new ArgumentException("HTTP_REPOSITORY_IDENTITY_INVALID");
         return new(null, owner, "/user/repos", "affiliation=owner&per_page=100", true, ValidPage(page));
     }
-    internal static GitHubRequest ForMetadata(string owner, string repository, string fileName, int? page = null)
+    internal static GitHubRequest ForRepositoryScope(string authenticatedOwner, string scopeOwner, bool collaborators, int? page = null)
     {
-        _ = new AssetIdentity(owner, repository, 1);
+        if (!AuthConfigLease.IsLogin(authenticatedOwner)) throw new ArgumentException("HTTP_REPOSITORY_IDENTITY_INVALID");
+        if (collaborators)
+            return new(null, authenticatedOwner, "/user/repos", "affiliation=collaborator&per_page=100", true, ValidPage(page));
+        if (string.IsNullOrWhiteSpace(scopeOwner) || string.Equals(scopeOwner, authenticatedOwner, StringComparison.OrdinalIgnoreCase))
+            return ForOwnedRepositories(authenticatedOwner, page);
+        if (!AuthConfigLease.IsLogin(scopeOwner)) throw new ArgumentException("HTTP_REPOSITORY_SCOPE_INVALID");
+        return new(null, authenticatedOwner, "/orgs/" + scopeOwner + "/repos", "type=all&per_page=100", true, ValidPage(page));
+    }
+    internal static GitHubRequest ForMetadata(string owner, string repository, string fileName, int? page = null)
+        => ForMetadata(owner, owner, repository, fileName, page);
+
+    internal static GitHubRequest ForMetadata(string authenticatedOwner, string repositoryOwner, string repository, string fileName, int? page = null)
+    {
+        _ = new AssetIdentity(repositoryOwner, repository, 1);
         if (repository[0] == '-' || repository.EndsWith('.'))
             throw new ArgumentException("HTTP_REPOSITORY_IDENTITY_INVALID");
-        string prefix = $"/repos/{owner}/{repository}";
+        string prefix = $"/repos/{repositoryOwner}/{repository}";
         (string suffix, string query, bool paginated) = fileName switch
         {
             "repository.json" => ("", "", false),
@@ -42,10 +55,12 @@ internal sealed class GitHubRequest
             "labels.pages.json" => ("/labels", "per_page=100", true),
             "milestones.pages.json" => ("/milestones", "state=all&per_page=100", true),
             "workflows.pages.json" => ("/actions/workflows", "per_page=100", true),
+            "actions-runs.pages.json" => ("/actions/runs", "per_page=100", true),
+            "actions-artifacts.pages.json" => ("/actions/artifacts", "per_page=100", true),
             _ => throw new ArgumentException("HTTP_METADATA_FILE_INVALID")
         };
         if (!paginated && page is not null) throw new ArgumentException("HTTP_PAGINATION_REJECTED");
-        return new(null, owner, prefix + suffix, query, paginated, ValidPage(page));
+        return new(null, authenticatedOwner, prefix + suffix, query, paginated, ValidPage(page));
     }
     private static int ValidPage(int? page) => page is null ? 1 : page is > 0 and <= 1_000_000
         ? page.Value : throw new ArgumentException("HTTP_PAGINATION_REJECTED");
@@ -133,6 +148,10 @@ internal interface IGitHubHttpTransport : IDisposable
     long BoundAccountId { get; }
     Task<GitHubResponse> SendAsync(GitHubRequest request, CancellationToken token);
     Task<GitHubResponse> DownloadAssetAsync(AssetIdentity asset, CancellationToken token);
+    Task<GitHubResponse> DownloadAssetAsync(AssetIdentity asset, string authenticatedOwner, CancellationToken token) =>
+        DownloadAssetAsync(asset, token);
+    Task<GitHubResponse> DownloadActionsBinaryAsync(string authenticatedOwner, string resourcePath, CancellationToken token) =>
+        throw new NotSupportedException("HTTP_ACTIONS_DOWNLOAD_UNAVAILABLE");
 }
 
 internal sealed record HttpTimeoutLimits
@@ -224,7 +243,7 @@ internal sealed class GitHubHttpTransport : IGitHubHttpTransport
 
     public Task<GitHubResponse> SendAsync(GitHubRequest request, CancellationToken token)
     {
-        if (request.Asset is not null) CheckAsset(request.Asset);
+        if (request.Asset is not null) CheckAsset(request.Asset, request.Owner);
         else CheckOwner(request.Owner);
         return SendWithPolicyAsync(new Uri("https://api.github.com" + request.ResourceKey), request.ResourceKey,
             request.Asset is null ? "application/vnd.github+json" : "application/octet-stream", false, token, request);
@@ -232,15 +251,41 @@ internal sealed class GitHubHttpTransport : IGitHubHttpTransport
 
     public Task<GitHubResponse> DownloadAssetAsync(AssetIdentity asset, CancellationToken token)
     {
-        CheckAsset(asset);
+        return DownloadAssetAsync(asset, asset.Owner, token);
+    }
+
+    public Task<GitHubResponse> DownloadAssetAsync(AssetIdentity asset, string authenticatedOwner, CancellationToken token)
+    {
+        CheckAsset(asset, authenticatedOwner);
         return SendWithPolicyAsync(new Uri("https://api.github.com" + asset.ResourceKey), asset.ResourceKey,
             "application/octet-stream", true, token);
     }
 
-    private void CheckAsset(AssetIdentity asset)
+    public Task<GitHubResponse> DownloadActionsBinaryAsync(string authenticatedOwner, string resourcePath, CancellationToken token)
+    {
+        CheckOwner(authenticatedOwner);
+        ValidateActionsDownloadPath(resourcePath);
+        return SendWithPolicyAsync(new Uri("https://api.github.com" + resourcePath), resourcePath,
+            "application/octet-stream", true, token);
+    }
+
+    private static void ValidateActionsDownloadPath(string resourcePath)
+    {
+        string[] parts = resourcePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 7 || parts[0] != "repos" || parts[3] != "actions"
+            || !AuthConfigLease.IsLogin(parts[1])
+            || parts[4] is not ("runs" or "artifacts")
+            || !long.TryParse(parts[5], NumberStyles.None, CultureInfo.InvariantCulture, out long id) || id <= 0
+            || (parts[4] == "runs" && parts[6] != "logs")
+            || (parts[4] == "artifacts" && parts[6] != "zip"))
+            throw new HttpTransferException("HTTP_ACTIONS_RESOURCE_INVALID");
+        _ = new AssetIdentity(parts[1], parts[2], 1);
+    }
+
+    private void CheckAsset(AssetIdentity asset, string authenticatedOwner)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (BoundAccountId <= 0 || !string.Equals(asset.Owner, BoundLogin, StringComparison.OrdinalIgnoreCase))
+        if (BoundAccountId <= 0 || !string.Equals(authenticatedOwner, BoundLogin, StringComparison.OrdinalIgnoreCase))
             throw new HttpTransferException("HTTP_ASSET_IDENTITY_REJECTED");
     }
 
@@ -301,9 +346,10 @@ internal sealed class GitHubHttpTransport : IGitHubHttpTransport
                     finally { exchange.Dispose(); }
                     continue;
                 }
-                NetworkFailureKind statusKind = NetworkProbe.ClassifyHttpStatus(status, ReadHeader(exchange.Response, "X-RateLimit-Remaining"));
+                string? retryAfter = ReadHeader(exchange.Response, "Retry-After");
+                NetworkFailureKind statusKind = NetworkProbe.ClassifyHttpStatus(status, ReadHeader(exchange.Response, "X-RateLimit-Remaining"), retryAfter);
                 DateTimeOffset? reset = statusKind == NetworkFailureKind.RateLimited
-                    ? ParseReset(ReadHeader(exchange.Response, "X-RateLimit-Reset")) : null;
+                    ? Later(ParseReset(ReadHeader(exchange.Response, "X-RateLimit-Reset")), ParseRetryAfter(retryAfter)) : null;
                 exchange.Dispose();
                 if (RetryPolicy.ShouldRetry(statusKind, attempt)) break;
                 throw new HttpTransferException(statusKind == NetworkFailureKind.RateLimited ? "HTTP_RATE_LIMITED"
@@ -447,6 +493,20 @@ internal sealed class GitHubHttpTransport : IGitHubHttpTransport
         try { return DateTimeOffset.FromUnixTimeSeconds(seconds); }
         catch (ArgumentOutOfRangeException) { return null; }
     }
+
+    private static DateTimeOffset? ParseRetryAfter(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long seconds)
+            && seconds is >= 0 and <= 86_400)
+            return DateTimeOffset.UtcNow.AddSeconds(seconds);
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset date))
+            return date;
+        return null;
+    }
+
+    private static DateTimeOffset? Later(DateTimeOffset? first, DateTimeOffset? second) => first is null ? second
+        : second is null ? first : first >= second ? first : second;
 
     public void Dispose()
     {

@@ -6,6 +6,10 @@ public partial class MainForm : Form
 {
     private const string DeviceLoginUrl = "https://github.com/login/device";
     private readonly DesktopActions actions;
+    private readonly Func<CancellationToken, Task<BackupSchedule>>? loadSchedule;
+    private readonly Func<BackupSchedule, CancellationToken, Task>? saveSchedule;
+    private BackupSchedule schedule = BackupSchedule.Disabled;
+    private RunStatus? lastBackupStatus;
     private bool loading = true, busy, ready, cancelling, awaitingClose;
     private CancellationTokenSource? cancellation;
     private AppSettings savedSettings = AppSettings.Default;
@@ -24,11 +28,15 @@ public partial class MainForm : Form
     private int progressRevision;
     private EnvironmentStatus? environmentStatus;
 
-    public MainForm() : this(new DesktopWorkflow(AppPaths.Create(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))).Actions) { }
-    internal MainForm(DesktopActions actions)
+    public MainForm() : this(CreateDefaultWorkflow()) { }
+    private MainForm(DesktopWorkflow workflow) : this(workflow.Actions, workflow.LoadScheduleAsync, workflow.SaveScheduleAsync) { }
+    private static DesktopWorkflow CreateDefaultWorkflow() => new(AppPaths.Create(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)));
+    internal MainForm(DesktopActions actions, Func<CancellationToken, Task<BackupSchedule>>? loadSchedule = null,
+        Func<BackupSchedule, CancellationToken, Task>? saveSchedule = null)
     {
+        this.loadSchedule = loadSchedule; this.saveSchedule = saveSchedule;
         UiLanguageState.Current = AppUiLanguage.SimplifiedChinese;
-        this.actions = actions; InitializeComponent(); LoadAuthorPortrait(); ApplyLanguage();
+        this.actions = actions; InitializeComponent(); AutoScroll = true; LoadAuthorPortrait(); ApplyLanguage();
         string? executable = Environment.ProcessPath;
         if (!string.IsNullOrWhiteSpace(executable))
         {
@@ -73,9 +81,15 @@ public partial class MainForm : Form
             OwnerFieldLabel.Text = T("GitHub 账号(&U)", "GitHub account(&U)");
             BackupRootFieldLabel.Text = T("备份目录(&D)", "Backup folder(&D)");
             ModeFieldLabel.Text = T("备份方式(&M)", "Backup type(&M)");
+            RepositoryScopeFieldLabel.Text = T("仓库范围（可选组织名）", "Repository scope (optional organization)");
             string ownerName = OwnerFieldLabel.Text.Replace("(&U)", "", StringComparison.Ordinal);
             string rootName = BackupRootFieldLabel.Text.Replace("(&D)", "", StringComparison.Ordinal);
             OwnerTextBox.AccessibleName = ownerName; BackupRootTextBox.AccessibleName = rootName;
+            RepositoryScopeTextBox.AccessibleName = T("仓库范围（可选组织名）", "Repository scope (optional organization)");
+            IncludeCollaboratorCheckBox.Text = IncludeCollaboratorCheckBox.AccessibleName = T("明确包含协作者仓库（可能扩大备份范围）", "Explicitly include collaborator repositories (may expand the scope)");
+            IncludeActionsCheckBox.Text = IncludeActionsCheckBox.AccessibleName = T("保存 GitHub Actions 日志和构建附件（可选）", "Save GitHub Actions logs and build artifacts (optional)");
+            ActionsMaxSizeFieldLabel.Text = T("Actions 单仓库上限（MB）", "Actions per-repository limit (MB)");
+            ActionsMaxSizeNumeric.AccessibleName = ActionsMaxSizeFieldLabel.Text;
             ModeComboBox.Items.Clear();
             ModeComboBox.Items.AddRange(en
                 ? ["Daily backup (repositories, LFS, wikis, and related data)", "Full backup (also includes release assets)"]
@@ -99,6 +113,9 @@ public partial class MainForm : Form
             RetryCleanupButton.Text = RetryCleanupButton.AccessibleName = T("重试清理(&R)", "Retry cleanup(&R)");
             LatestLogButton.Text = LatestLogButton.AccessibleName = T("查看最近日志(&V)…", "View latest log(&V)…");
             OpenFolderButton.Text = OpenFolderButton.AccessibleName = T("打开备份目录(&O)", "Open backup folder(&O)");
+            RestoreButton.Text = RestoreButton.AccessibleName = T("验证并恢复到新目录(&R)…", "Verify and restore to a new folder(&R)…");
+            ScheduleButton.Text = ScheduleButton.AccessibleName = T("自动备份设置(&A)…", "Automatic backup settings(&A)…");
+            SecondaryCopyButton.Text = SecondaryCopyButton.AccessibleName = T("复制第二份本地副本(&C)…", "Create a second local copy(&C)…");
             DiagnosticsButton.Text = DiagnosticsButton.AccessibleName = T("预览并导出诊断(&X)…", "Preview and export diagnostics(&X)…");
             LiveLogTitleLabel.Text = T("实时脱敏日志（最多保留末尾 2,000 行）", "Live redacted log (keeps the latest 2,000 lines)");
             LiveLogTextBox.AccessibleName = T("实时脱敏日志", "Live redacted log");
@@ -129,7 +146,9 @@ GitHub 备份工具 · 操作指导
 1. 在“GitHub 账号”填写要备份的账号，并选择“备份目录”。新目录请先验证并保存。
 2. 如尚未登录，点“浏览器登录”。程序会显示一次性代码并尝试打开 GitHub 登录页：https://github.com/login/device 。在网页输入当前窗口中的代码并完成授权；不要把代码发给他人。
 3. 勾选凭据访问许可，再点“重新检查环境”。只有出现“检查通过”后，“开始备份”才会启用。
-4. 选择“日常备份”或“完整备份”，然后点“开始备份”。运行时保持窗口打开；结束后查看状态、最近运行记录和备份目录。
+4. 如需备份组织或协作者仓库，在开始前填写“仓库范围”或勾选协作者选项；留空且不勾选时仍只备份当前账号自己的仓库。
+5. 如需保存 GitHub Actions 运行日志和构建附件，勾选对应选项并设置每个仓库的空间上限；达到上限或附件已过期时，程序会跳过并在日志中说明。
+6. 选择“日常备份”或“完整备份”，然后点“开始备份”。运行时保持窗口打开；结束后查看状态、最近运行记录和备份目录。
 
 常见问题
 • 浏览器没有打开：看窗口是否显示一次性代码；用浏览器访问上面的 GitHub 地址并输入该代码。如果没有代码，不要猜，重新点“浏览器登录”。
@@ -140,7 +159,8 @@ GitHub 备份工具 · 操作指导
 • 目录无法保存或空间不足：确认目录存在、磁盘可写且可用空间至少 1 GiB；通过“选择目录”选择其他目录后再验证保存。
 • PREFLIGHT_PRIVATE_READ_ACL_UNSAFE：其他本机账户可以读取所选备份目录。点击“检查并修复权限”，只勾选你确认的准确目录；修复会收紧该目录的访问权限，不会更改目录内容。
 • 缺少或版本过旧的软件：点“检测与安装依赖”，确认后安装；也可以按依赖窗口中的官方地址手动安装，再重新检查。
-• GitHub 请求次数受限：等待提示的重置时间后再操作，不需要重复登录。
+• GitHub 请求次数受限：等待提示的重置时间后再操作，不需要重复登录；程序会保存已完成仓库的进度。
+• Actions 数据没有全部保存：检查每仓库空间上限、附件是否已过期，以及日志中的 `ACTIONS_*` 提示。
 • 仍无法解决：点“查看最近日志”或“预览并导出诊断”。分享前确认诊断已脱敏，不要发送一次性代码、凭据或完整备份内容。
 
 提示：状态中的“浏览器登录流程已结束”仅表示登录命令已停止；请以上方显示的失败原因和错误代码为准。
@@ -158,7 +178,9 @@ Backup steps
 1. Enter the GitHub account to back up and choose a backup folder. Validate and save a new folder first.
 2. If you are not signed in, select “Sign in with browser.” The app shows a one-time code and tries to open GitHub: https://github.com/login/device . Enter the code shown in the app and finish authorization. Never share the code.
 3. Allow credential access, then select “Check setup again.” “Start backup” is enabled only after the setup check passes.
-4. Choose “Daily backup” or “Full backup,” then select “Start backup.” Keep the window open. When finished, check the status, recent run history, and backup folder.
+4. To include an organization or collaborator scope, fill in “Repository scope” or enable the collaborator option before starting. Leaving both off keeps the account-owned default.
+5. To save GitHub Actions run logs and build artifacts, enable the option and set a per-repository size limit. Expired or over-limit items are skipped and recorded in the log.
+6. Choose “Daily backup” or “Full backup,” then select “Start backup.” Keep the window open. When finished, check the status, recent run history, and backup folder.
 
 Common problems
 • Browser did not open: check whether a one-time code is shown. Open the GitHub link above and enter that code. If there is no code, do not guess; start browser sign-in again.
@@ -169,7 +191,8 @@ Common problems
 • Folder cannot be saved or disk space is low: make sure the folder exists, is writable, and has at least 1 GiB free. Choose another folder and validate it.
 • PREFLIGHT_PRIVATE_READ_ACL_UNSAFE: other local accounts can read the selected backup folder. Select “Check and fix permissions” and check only the exact folder you intend to secure. This changes folder permissions, not its contents.
 • A required tool is missing or too old: select “Check and install tools,” review the prompt, and install; or use the official links in that dialog, then check again.
-• GitHub rate limit reached: wait until the displayed reset time. Repeated sign-ins are not needed.
+• GitHub rate limit reached: wait until the displayed reset time. Repeated sign-ins are not needed; completed repository progress is saved.
+• Not all Actions data was saved: check the per-repository size limit, artifact expiry, and `ACTIONS_*` messages in the latest log.
 • Still stuck: select “View latest log” or “Preview and export diagnostics.” Confirm the diagnostic is redacted before sharing. Never share one-time codes, credentials, or full backup contents.
 
 Note: “Browser sign-in flow ended” only means the sign-in command stopped. Use the status above it and its error code to understand the result.
@@ -211,14 +234,22 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
         Activate();
     }
 
-    internal Task LoadSettingsAsync() => OperateAsync(async token =>
+    internal async Task LoadSettingsAsync()
     {
+        bool due = false;
+        await OperateAsync(async token =>
+        {
         loading = true;
         try
         {
             var loaded = await actions.LoadSettings(token);
             savedSettings = loaded.Settings;
             OwnerTextBox.Text = loaded.Settings.Owner; BackupRootTextBox.Text = loaded.Settings.BackupRoot;
+            RepositoryScopeTextBox.Text = loaded.Settings.RepositoryScope;
+            IncludeCollaboratorCheckBox.Checked = loaded.Settings.IncludeCollaboratorRepositories;
+            IncludeActionsCheckBox.Checked = loaded.Settings.IncludeActionsArtifacts;
+            ActionsMaxSizeNumeric.Value = Math.Clamp(loaded.Settings.ActionsMaxBytes / (1024 * 1024),
+                (long)ActionsMaxSizeNumeric.Minimum, (long)ActionsMaxSizeNumeric.Maximum);
             ConsentCheckBox.Checked = loaded.Settings.HasApiCredentialConsentFor(loaded.Settings.Owner);
             SetStatus(
                 loaded.Warnings.Count != 0 ? "设置无法读取，请确认账号和目录。" : ConsentCheckBox.Checked ? "尚未检查环境。" : "需要允许应用访问已登录账号。",
@@ -227,15 +258,83 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
             if (suggestion is not null)
                 SetStatus(statusChinese + " 默认 D: 不可用，可选择：" + suggestion + "（尚未创建）。",
                     statusEnglish + " Default drive D: is unavailable. You can choose " + suggestion + " (it has not been created).");
+            if (loadSchedule is not null)
+            {
+                schedule = await loadSchedule(token).ConfigureAwait(true);
+                due = ScheduleService.IsDue(schedule, DateTimeOffset.Now);
+                if (schedule.Enabled)
+                {
+                    SetStatus((due ? "自动备份已到时间，完成环境检查后会执行。" : "自动备份：" + ScheduleText(schedule)) + "\n" + statusChinese,
+                        (due ? "An automatic backup is due and will run after setup is checked." : "Automatic backup: " + ScheduleText(schedule)) + "\n" + statusEnglish);
+                }
+            }
         }
         finally { loading = false; }
         await RefreshHistoryAsync();
-    });
+        });
+        if (due) await RunDueScheduleAsync();
+    }
+
+    private string ScheduleText(BackupSchedule value) => value.Frequency switch
+    {
+        BackupScheduleFrequency.Daily => $"每天 {value.Hour:00}:{value.Minute:00}",
+        BackupScheduleFrequency.Weekly => $"每周{new[] { "日", "一", "二", "三", "四", "五", "六" }[(int)value.DayOfWeek]} {value.Hour:00}:{value.Minute:00}",
+        _ => "未启用"
+    };
+
+    private async Task RunDueScheduleAsync()
+    {
+        if (loadSchedule is null || saveSchedule is null || !schedule.Enabled) return;
+        if (!ConsentCheckBox.Checked)
+        {
+            SetStatus("自动备份已到时间，请先允许凭据访问并重新检查环境。", "An automatic backup is due. Allow credential access and check setup first.");
+            return;
+        }
+        schedule = schedule with { LastStartedAtUtc = DateTimeOffset.UtcNow, LastStatus = "STARTED", LastErrorCode = null };
+        await saveSchedule(schedule, CancellationToken.None);
+        await CheckEnvironmentAsync();
+        if (!ready)
+        {
+            schedule = schedule with { LastCompletedAtUtc = DateTimeOffset.UtcNow, LastStatus = "FAILED", LastErrorCode = "SCHEDULED_PREFLIGHT_FAILED" };
+            await saveSchedule(schedule, CancellationToken.None);
+            return;
+        }
+        await StartBackupAsync();
+        schedule = schedule with { LastCompletedAtUtc = DateTimeOffset.UtcNow,
+            LastStatus = lastBackupStatus is RunStatus.Pass or RunStatus.Partial ? "COMPLETED" : "FAILED",
+            LastErrorCode = lastBackupStatus is RunStatus.Pass or RunStatus.Partial ? null : "SCHEDULED_BACKUP_FAILED" };
+        await saveSchedule(schedule, CancellationToken.None);
+    }
+
+    private Task ConfigureScheduleAsync()
+    {
+        if (loadSchedule is null || saveSchedule is null || busy || HasPendingCleanup) return Task.CompletedTask;
+        return OperateAsync(async token =>
+        {
+            BackupSchedule current = await loadSchedule(token).ConfigureAwait(true);
+            using var dialog = new ScheduleDialog(current);
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            schedule = dialog.SelectedSchedule with
+            {
+                LastStartedAtUtc = current.LastStartedAtUtc,
+                LastCompletedAtUtc = current.LastCompletedAtUtc,
+                LastStatus = current.LastStatus,
+                LastErrorCode = current.LastErrorCode
+            };
+            await saveSchedule(schedule, token).ConfigureAwait(true);
+            SetStatus(schedule.Enabled ? "自动备份已保存：" + ScheduleText(schedule) : "自动备份已关闭。",
+                schedule.Enabled ? "Automatic backup saved: " + ScheduleText(schedule) : "Automatic backup disabled.");
+        });
+    }
 
     private AppSettings SelectedSettings() => new(OwnerTextBox.Text.Trim(), BackupRootTextBox.Text.Trim(), NetworkMode.Auto)
     {
         ApiCredentialConsentVersion = ConsentCheckBox.Checked ? 1 : null,
-        ApiCredentialConsentLogin = ConsentCheckBox.Checked ? OwnerTextBox.Text.Trim().ToLowerInvariant() : null
+        ApiCredentialConsentLogin = ConsentCheckBox.Checked ? OwnerTextBox.Text.Trim().ToLowerInvariant() : null,
+        RepositoryScope = RepositoryScopeTextBox.Text.Trim(),
+        IncludeCollaboratorRepositories = IncludeCollaboratorCheckBox.Checked,
+        IncludeActionsArtifacts = IncludeActionsCheckBox.Checked,
+        ActionsMaxBytes = checked((long)ActionsMaxSizeNumeric.Value * 1024 * 1024)
     };
     private BackupMode SelectedMode => ModeComboBox.SelectedIndex == 1 ? BackupMode.Full : BackupMode.Daily;
     private bool ValidInputs => AuthConfigLease.IsLogin(OwnerTextBox.Text.Trim()) && Path.IsPathFullyQualified(BackupRootTextBox.Text.Trim());
@@ -436,6 +535,7 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
             var result = await actions.Run(SelectedMode, SelectedSettings(), new Progress<BackupProgress>(value =>
             { if (revision == progressRevision) ShowProgress(value); }), token);
             var summary = result.Summary;
+            lastBackupStatus = summary.Status;
             string chinese = summary.Status switch
             {
                 RunStatus.Pass => $"PASS · 备份完成，共 {summary.RepositoryCount} 个仓库。",
@@ -450,7 +550,8 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
                 RunStatus.Cancelled => "CANCELLED · Cancelled and cleanup complete.",
                 _ => "FAIL · " + ErrorText(summary.ErrorCode, result.NetworkFailure?.RateLimitReset, result.NetworkFailure, true)
             };
-            if (result.NetworkFailure is { FailureKind: NetworkFailureKind.RateLimited } limited && summary.ErrorCode != "HTTP_RATE_LIMITED")
+            if (result.NetworkFailure is { FailureKind: NetworkFailureKind.RateLimited } limited
+                && (summary.Status == RunStatus.Partial || summary.ErrorCode != "HTTP_RATE_LIMITED"))
             {
                 chinese += " " + ErrorText("HTTP_RATE_LIMITED", limited.RateLimitReset, limited, false);
                 english += " " + ErrorText("HTTP_RATE_LIMITED", limited.RateLimitReset, limited, true);
@@ -469,6 +570,65 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
             var result = await actions.OpenBackupFolder(SelectedSettings(), token);
             SetStatus(result.Opened ? "已请求打开备份目录。" : "备份目录无法安全打开，请确认目录存在且权限正确。",
                 result.Opened ? "The backup folder was opened." : "The backup folder could not be opened safely. Check that it exists and you have permission.");
+        });
+    }
+
+    private Task RestoreLatestAsync()
+    {
+        if (busy || HasPendingCleanup || !ValidInputs) return Task.CompletedTask;
+        return OperateAsync(async token =>
+        {
+            using var picker = new FolderBrowserDialog
+            {
+                Description = T("请选择恢复结果的上级目录。程序会新建一个恢复目录，不会覆盖已有目录。", "Choose a parent folder for the restore. The app creates a new folder and will not overwrite an existing one."),
+                UseDescriptionForTitle = true,
+                SelectedPath = Directory.Exists(savedSettings.BackupRoot) ? savedSettings.BackupRoot : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            };
+            if (picker.ShowDialog(this) != DialogResult.OK)
+            {
+                SetStatus("已取消恢复验证。", "Restore verification cancelled.");
+                return;
+            }
+            SetStatus("正在验证备份并恢复到新目录；请保持窗口打开。", "Verifying the backup and restoring to a new folder. Keep this window open.");
+            RestoreReport report = await actions.RestoreLatest(SelectedSettings(), picker.SelectedPath, token);
+            string destination = report.DestinationRoot;
+            string message = report.Success
+                ? $"PASS · 已验证并恢复 {report.RestoredCount}/{report.RepositoryCount} 个仓库。结果目录：{destination}"
+                : $"PARTIAL · 已恢复 {report.RestoredCount}/{report.RepositoryCount} 个仓库，请查看结果目录和缺失项目。结果目录：{destination}";
+            string messageEnglish = report.Success
+                ? $"PASS · Verified and restored {report.RestoredCount}/{report.RepositoryCount} repositories. Output: {destination}"
+                : $"PARTIAL · Restored {report.RestoredCount}/{report.RepositoryCount} repositories. Review missing items. Output: {destination}";
+            SetStatus(message, messageEnglish);
+            SetStatusIcon(report.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        });
+    }
+
+    private Task SecondaryCopyAsync()
+    {
+        if (busy || HasPendingCleanup || !ValidInputs) return Task.CompletedTask;
+        return OperateAsync(async token =>
+        {
+            using var picker = new FolderBrowserDialog
+            {
+                Description = T("请选择第二份本地副本的上级目录。程序会新建独立目录，不会覆盖已有目录。", "Choose a parent folder for the second local copy. The app creates a separate folder and will not overwrite an existing one."),
+                UseDescriptionForTitle = true,
+                SelectedPath = Directory.Exists(savedSettings.BackupRoot) ? savedSettings.BackupRoot : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            };
+            if (picker.ShowDialog(this) != DialogResult.OK)
+            {
+                SetStatus("已取消第二份副本。", "Second-copy operation cancelled.");
+                return;
+            }
+            SetStatus("正在校验并复制第二份本地副本；请保持窗口打开。", "Verifying and copying the second local copy. Keep this window open.");
+            SecondaryCopyReport report = await actions.SecondaryCopy(SelectedSettings(), picker.SelectedPath, token);
+            string message = report.Success
+                ? $"PASS · 已复制第二份副本，共 {report.FileCount} 个文件（{report.BytesCopied:N0} 字节）。目录：{report.DestinationRoot}"
+                : $"PARTIAL · 第二份副本未完整复制，请保留主备份并查看提示。目录：{report.DestinationRoot}";
+            string messageEnglish = report.Success
+                ? $"PASS · The second copy contains {report.FileCount} files ({report.BytesCopied:N0} bytes). Folder: {report.DestinationRoot}"
+                : $"PARTIAL · The second copy is incomplete. Keep the primary backup and review the warning. Folder: {report.DestinationRoot}";
+            SetStatus(message, messageEnglish);
+            SetStatusIcon(report.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         });
     }
 
@@ -646,6 +806,7 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
     {
         bool idle = !busy && !HasPendingCleanup;
         OwnerTextBox.Enabled = BackupRootTextBox.Enabled = BrowseButton.Enabled = ModeComboBox.Enabled = ConsentCheckBox.Enabled = idle;
+        RepositoryScopeTextBox.Enabled = IncludeCollaboratorCheckBox.Enabled = IncludeActionsCheckBox.Enabled = ActionsMaxSizeNumeric.Enabled = idle;
         LoginButton.Enabled = idle;
         CheckButton.Enabled = idle && ValidInputs && RootSaved && ConsentCheckBox.Checked;
         DependencyButton.Enabled = idle;
@@ -654,7 +815,8 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
         StartButton.Enabled = idle && ready && ConsentCheckBox.Checked;
         CancelOperationButton.Enabled = busy && !cancelling;
         RetryCleanupButton.Enabled = !busy && HasPendingCleanup;
-        LatestLogButton.Enabled = OpenFolderButton.Enabled = DiagnosticsButton.Enabled = idle && ValidInputs;
+        LatestLogButton.Enabled = OpenFolderButton.Enabled = RestoreButton.Enabled = SecondaryCopyButton.Enabled = DiagnosticsButton.Enabled = idle && ValidInputs;
+        ScheduleButton.Enabled = idle && loadSchedule is not null && saveSchedule is not null;
         ActivityBar.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
         ActivityBar.MarqueeAnimationSpeed = busy ? 30 : 0;
     }
@@ -696,8 +858,8 @@ Note: “Browser sign-in flow ended” only means the sign-in command stopped. U
     {
         string T(string chinese, string translated) => english ? translated : chinese;
         string reset = rateLimitReset is { } value
-            ? value.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture)
-            : english ? "unknown" : "未知";
+            ? value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", System.Globalization.CultureInfo.InvariantCulture)
+            : english ? "reset time unknown" : "重置时间未知";
         string message = code switch
         {
             "AUTH_OWNER_MISMATCH" or "AUTH_LOGIN_MISMATCH" or "BACKUP_OWNER_SESSION_MISMATCH" => T("所选账号与浏览器登录账号不一致，请确认后重新检查。", "The selected account does not match the account signed in through the browser. Confirm the account and check again."),

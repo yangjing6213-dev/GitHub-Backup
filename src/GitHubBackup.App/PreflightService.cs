@@ -137,6 +137,10 @@ internal sealed class PreflightService(AuthService auth, IProcessRunner runner, 
             if (free < 1024L * 1024 * 1024) throw new PreflightFailure("STORAGE_FREE_SPACE_REQUIRED","备份目录至少需要 1 GiB 可用空间。");
             storage = true;
             if (!AuthConfigLease.IsLogin(settings.Owner)) throw new PreflightFailure("OWNER_INVALID","请输入有效的 GitHub 用户名。");
+            if (settings.RepositoryScope.Length > 0 && !AuthConfigLease.IsLogin(settings.RepositoryScope))
+                throw new PreflightFailure("REPOSITORY_SCOPE_INVALID", "仓库范围必须是有效的 GitHub 组织名。");
+            if (settings.IncludeActionsArtifacts && settings.ActionsMaxBytes is < ActionsArchiveService.MinimumMaxBytes or > ActionsArchiveService.MaximumMaxBytes)
+                throw new PreflightFailure("ACTIONS_SIZE_LIMIT_INVALID", "Actions 日志和附件上限必须在 16 MB 到 4 GB 之间。");
             // Local residue sanitization precedes any network operation or discovery.
             string? localAuthFailure = null;
             try { using var startup = auth.AcquireConfig(); }
@@ -224,7 +228,8 @@ internal sealed class PreflightService(AuthService auth, IProcessRunner runner, 
                     // below supersedes the binding failure with an identity error.
                     catch (HttpBindingCleanupException ex) { transport = ex.Transport; throw; }
                     finally { if (transport is null) credential.Dispose(); Revalidate(); }
-                    try { repositories = await new RepositoryDiscoveryService(transport).DiscoverAsync(settings.Owner,token).ConfigureAwait(false); }
+                    try { repositories = await new RepositoryDiscoveryService(transport).DiscoverAsync(settings.Owner,
+                        settings.RepositoryScope, settings.IncludeCollaboratorRepositories, token).ConfigureAwait(false); }
                     finally { Revalidate(); }
                 }
                 else
@@ -232,7 +237,7 @@ internal sealed class PreflightService(AuthService auth, IProcessRunner runner, 
                     try { repositories = Array.AsReadOnly((await discoverRepositories!(settings.Owner,tools,environment,job,token).ConfigureAwait(false)).ToArray()); }
                     finally { Revalidate(); }
                 }
-                CheckCancellation(); ValidateRepositories(settings.Owner,repositories); visibility = true;
+                CheckCancellation(); ValidateRepositories(settings.Owner, settings.RepositoryScope, settings.IncludeCollaboratorRepositories, repositories); visibility = true;
                 return repositories.Count == 0 ? new(true,NetworkFailureKind.None,null,"")
                     : await probe.CheckRepositoryAsync(tools,new Uri(repositories[0].Url),environment,job,token).ConfigureAwait(false);
             }
@@ -313,16 +318,20 @@ internal sealed class PreflightService(AuthService auth, IProcessRunner runner, 
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
         { throw new IOException("PREFLIGHT_CLEANUP_FAILED"); }
     }
-    private static void ValidateRepositories(string owner,IReadOnlyList<RepositoryDescriptor> repositories)
+    private static void ValidateRepositories(string owner, string scopeOwner, bool collaborators, IReadOnlyList<RepositoryDescriptor> repositories)
     {
         var ids = new HashSet<long>(); var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var repository in repositories)
         {
+            string[] parts = repository.NameWithOwner.Split('/');
+            bool remoteOwnerAllowed = parts.Length == 2 && AuthConfigLease.IsLogin(parts[0])
+                && (collaborators || string.Equals(parts[0], scopeOwner.Length == 0 ? owner : scopeOwner, StringComparison.OrdinalIgnoreCase));
             if (repository.RepositoryId <= 0 || !ids.Add(repository.RepositoryId) || !names.Add(repository.LocalName)
                 || string.IsNullOrEmpty(repository.LocalName) || repository.LocalName is "." or ".." || repository.LocalName.EndsWith('.') || repository.LocalName.EndsWith(' ')
                 || repository.LocalName.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.'))
+                || !remoteOwnerAllowed
                 || !Uri.TryCreate(repository.Url,UriKind.Absolute,out var uri) || !NetworkProbe.IsRepositoryUrl(uri)
-                || !uri.AbsolutePath.StartsWith("/" + owner + "/",StringComparison.OrdinalIgnoreCase)) throw new PreflightFailure("REPOSITORY_DISCOVERY_INVALID","仓库列表包含无效或不属于当前账户的条目。");
+                || !uri.AbsolutePath.StartsWith("/" + parts[0] + "/",StringComparison.OrdinalIgnoreCase)) throw new PreflightFailure("REPOSITORY_DISCOVERY_INVALID","仓库列表包含无效或不属于已选择范围的条目。");
         }
     }
     private sealed class PreflightFailure(string code,string userMessage) : Exception(code)

@@ -598,6 +598,8 @@ internal sealed class UiFixture
         (_, _) => Task.FromResult(History),
         (_, _) => Task.FromResult(new ValidatedLogDocument("日志", ["safe"])),
         (_, _) => Task.FromResult(new SafeOpenResult(true, "")),
+        (_, _, _) => Task.FromResult(new RestoreReport("fixture-user", @"C:\restore", 0, 0, 0, [], [])),
+        (_, _, _) => Task.FromResult(new SecondaryCopyReport("fixture-user", @"C:\secondary", 0, 0, [])),
         (_, _) => Task.FromResult(new DiagnosticDisplayPreview("fixture", ["safe"])),
         (_, _, _, confirmed, _) => Task.FromResult(confirmed ? DiagnosticSaveStatus.Saved : DiagnosticSaveStatus.Cancelled),
         _ => Task.FromResult(ToolInventory.Empty),

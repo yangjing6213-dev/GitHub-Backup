@@ -6,6 +6,8 @@ namespace GitHubBackup.App;
 internal sealed record AppPaths(string LocalAppDataAnchor, string LocalAppDataRoot,
     string SettingsFile, string DiagnosticLogRoot, string DiagnosticFallbackRoot, string AppGhConfigDirectory)
 {
+    internal string ScheduleFile => Path.Combine(LocalAppDataRoot, "schedule.json");
+
     internal static AppPaths Create(string localAppData)
     {
         string anchor = NativeFileSystem.CanonicalPath(localAppData);

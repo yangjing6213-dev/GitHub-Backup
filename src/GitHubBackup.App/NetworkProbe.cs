@@ -55,8 +55,8 @@ internal sealed class NetworkProbe(IProcessRunner runner)
     }
     private static NetworkFailureKind HttpKind(int status) => status switch
     { 401 => NetworkFailureKind.Unauthorized, 403 => NetworkFailureKind.Forbidden, 404 => NetworkFailureKind.NotFound, 407 => NetworkFailureKind.ProxyAuthentication, 429 => NetworkFailureKind.RateLimited, >= 500 and <= 599 => NetworkFailureKind.Http5xx, _ => NetworkFailureKind.Unknown };
-    internal static NetworkFailureKind ClassifyHttpStatus(int status, string? remaining) =>
-        status == 403 && remaining == "0" ? NetworkFailureKind.RateLimited : HttpKind(status);
+    internal static NetworkFailureKind ClassifyHttpStatus(int status, string? remaining, string? retryAfter = null) =>
+        status == 403 && (remaining == "0" || !string.IsNullOrWhiteSpace(retryAfter)) ? NetworkFailureKind.RateLimited : HttpKind(status);
 }
 
 // Synchronous IProgress is intentional: ProcessRunner's completed drains must also

@@ -121,6 +121,8 @@ public sealed class GitHubHttpTransportTests
     [DataRow("labels.pages.json", "/repos/fixture-user/fixture-repo/labels?per_page=100")]
     [DataRow("milestones.pages.json", "/repos/fixture-user/fixture-repo/milestones?state=all&per_page=100")]
     [DataRow("workflows.pages.json", "/repos/fixture-user/fixture-repo/actions/workflows?per_page=100")]
+    [DataRow("actions-runs.pages.json", "/repos/fixture-user/fixture-repo/actions/runs?per_page=100")]
+    [DataRow("actions-artifacts.pages.json", "/repos/fixture-user/fixture-repo/actions/artifacts?per_page=100")]
     public async Task Frozen_metadata_table_sends_only_approved_paths_and_filters(string fileName, string expected)
     {
         string? actual = null;
@@ -129,7 +131,7 @@ public sealed class GitHubHttpTransportTests
             if (request.RequestUri!.AbsolutePath == "/user") return Ok("{\"login\":\"fixture-user\",\"id\":7}");
             actual = request.RequestUri.PathAndQuery;
             Assert.AreEqual("application/vnd.github+json", request.Headers.Accept.Single().MediaType);
-            return Ok(fileName == "repository.json" || fileName == "workflows.pages.json" ? "{}" : "[]");
+            return Ok(fileName is "repository.json" or "workflows.pages.json" or "actions-runs.pages.json" or "actions-artifacts.pages.json" ? "{}" : "[]");
         });
         using var transport = await Bind(handler);
         using var response = await transport.SendAsync(GitHubRequest.ForMetadata("fixture-user", "fixture-repo", fileName), default);
@@ -143,6 +145,26 @@ public sealed class GitHubHttpTransportTests
     public void Metadata_factory_rejects_noncanonical_repository_segments(string repository) =>
         Assert.ThrowsExactly<ArgumentException>(() =>
             GitHubRequest.ForMetadata("fixture-user", repository, "repository.json"));
+
+    [TestMethod]
+    public async Task Actions_binary_download_is_bound_to_authenticated_owner_and_safe_path()
+    {
+        string? actual = null;
+        var handler = new ScriptedHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/user") return Ok("{\"login\":\"fixture-user\",\"id\":7}");
+            actual = request.RequestUri.PathAndQuery;
+            Assert.AreEqual("application/octet-stream", request.Headers.Accept.Single().MediaType);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent("zip"u8.ToArray()) };
+        });
+        using var transport = await Bind(handler);
+        using var response = await transport.DownloadActionsBinaryAsync("fixture-user", "/repos/other-owner/repo/actions/runs/101/logs", default);
+        Assert.AreEqual("/repos/other-owner/repo/actions/runs/101/logs", actual);
+        using var reader = new StreamReader(response.Body);
+        Assert.AreEqual("zip", await reader.ReadToEndAsync());
+        Assert.AreEqual("HTTP_ACTIONS_RESOURCE_INVALID", (await Assert.ThrowsExactlyAsync<HttpTransferException>(() =>
+            transport.DownloadActionsBinaryAsync("fixture-user", "/repos/other-owner/repo/actions/runs/101/other", default))).Code);
+    }
 
     [TestMethod]
     public async Task Handler_cleanup_failure_still_zeros_owned_credential()

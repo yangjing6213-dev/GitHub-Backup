@@ -4,14 +4,15 @@ This document is a public summary, not the original machine/account diagnostic l
 
 ## Current follow-up status — 2026-10-07
 
-This section supersedes the historical snapshots below for the current v4 build. The unsigned preview is published as [setup-preview-20261007-v4](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4), with the installer and a separate checksum file.
+This section supersedes the historical snapshots below for the current v5 build. The unsigned preview is published as [setup-preview-20261007-v5](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v5), with the installer and a separate checksum file.
 
-- Installer artifact: `GitHubBackup-setup.exe`, 93,293,246 bytes, SHA-256 `937DDD6E89C1A72CD1C36766591B3AFEF2297DD316DC439DEE69F3050B1C751F`.
-- Bundled app: self-contained Windows x64 executable, SHA-256 `99571B5DD8C42CDE84475E3001D440895F43925E981A96652DD077908939BD08`. Installer and app static verification: PASS. The installer is unsigned.
-- Local replacement: old version uninstall and v4 install exited successfully; installed files, shortcuts, uninstall registration and receipt passed verification. Existing settings hash was unchanged.
-- Local backup: the user confirmed that a normal backup completed successfully with the installed app. This record relies on that confirmation; this documentation update did not inspect backup contents, credentials, or account data.
-- Related focused tests: 269 passed, 0 failed, 0 skipped. The broader test suite was not rerun for this package update.
-- Clean-PC use, installation on other computers/accounts, and restoring a backup: NOT_RUN. A successful backup on one PC does not establish compatibility with every network or repository.
+- Installer artifact: `GitHubBackup-setup.exe`, 93,358,801 bytes, SHA-256 `40F0C458F3A97F9DEB97088FD11A51E695014EE467B2D88284F1E8092D1713DB`.
+- Bundled app: self-contained Windows x64 executable, 117,487,776 bytes, SHA-256 `302B5F16C1FF14324BB32287A2C27ACD050B840DC04320454A7BDED4C8D30375`. Installer and app static verification: PASS. The installer is unsigned.
+- Local replacement: the previous installed version was uninstalled with exit code 0; its install directory, start-menu shortcut, and uninstall registration were removed. The v5 installer exited with code 0 and installed four owned files; hashes, start-menu shortcut, uninstall registration, and committed receipt passed verification. Existing settings hash `1E1033DAE5A6AB2DB59800A35BB572E387C5D18FC07E2D4125796148D0A79F23` was unchanged.
+- Source verification: full MSTest suite 1,199 passed, 0 failed, 31 skipped (1,230 total); Release x64 rebuild 0 warnings / 0 errors; single-file verifier PASS; `git diff --check` PASS after documentation updates.
+- Iteration capabilities included in this package: new-folder restore verification, rate-limit pause/resume checkpoints, daily/weekly startup schedule, second local copy, explicit organization/collaborator scope, and optional Actions logs/artifacts with per-repository limits.
+- Old package-only build directories were sent to the Windows Recycle Bin after file-count and scope checks; source, backups, settings, credentials, and the new v5 payload were not touched.
+- Clean-PC use, installation on other computers/accounts, real-account scope differences, and restoring a backup: NOT_RUN. A successful local installation does not establish compatibility with every network, account, or repository.
 - Compatibility note: a schema-2 older install is not upgraded in place; its existing `Uninstall.exe` must be run first. If a current uninstall registration is missing, uninstall can proceed after validating the files, but a repair/reinstall through that missing registration remains fail-closed.
 
 ## Historical snapshot — 2026-10-03 (superseded above)

@@ -6,11 +6,18 @@ namespace GitHubBackup.App;
 internal sealed class RepositoryDiscoveryService(IGitHubHttpTransport transport)
 {
     private const int MaxDiscoveryPageBytes = 8 * 1024 * 1024;
-    internal async Task<IReadOnlyList<RepositoryDescriptor>> DiscoverAsync(string owner, CancellationToken token)
+    internal Task<IReadOnlyList<RepositoryDescriptor>> DiscoverAsync(string owner, CancellationToken token) =>
+        DiscoverAsync(owner, "", false, token);
+
+    internal async Task<IReadOnlyList<RepositoryDescriptor>> DiscoverAsync(string owner, string scopeOwner,
+        bool collaborators, CancellationToken token)
     {
         if (!AuthConfigLease.IsLogin(owner) || transport.BoundAccountId <= 0
             || !string.Equals(owner, transport.BoundLogin, StringComparison.OrdinalIgnoreCase))
             throw new HttpTransferException("REPOSITORY_DISCOVERY_INVALID");
+        if (scopeOwner.Length > 0 && !AuthConfigLease.IsLogin(scopeOwner))
+            throw new HttpTransferException("REPOSITORY_DISCOVERY_INVALID");
+        bool ownScope = !collaborators && (scopeOwner.Length == 0 || string.Equals(scopeOwner, owner, StringComparison.OrdinalIgnoreCase));
         var repositories = new List<RepositoryDescriptor>();
         var ids = new HashSet<long>();
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -18,7 +25,7 @@ internal sealed class RepositoryDiscoveryService(IGitHubHttpTransport transport)
         do
         {
             token.ThrowIfCancellationRequested();
-            using GitHubResponse response = await transport.SendAsync(GitHubRequest.ForOwnedRepositories(owner,
+            using GitHubResponse response = await transport.SendAsync(GitHubRequest.ForRepositoryScope(owner, scopeOwner, collaborators,
                 page == 1 ? null : page), token).ConfigureAwait(false);
             if (response.StatusCode != 200) throw new HttpTransferException("REPOSITORY_DISCOVERY_INVALID");
             try
@@ -63,10 +70,14 @@ internal sealed class RepositoryDiscoveryService(IGitHubHttpTransport transport)
                     DateTimeOffset? updated = null;
                     if (entry.TryGetProperty("updated_at", out JsonElement date) && date.ValueKind != JsonValueKind.Null)
                         updated = date.GetDateTimeOffset();
-                    RepositoryEndpointValidation endpoint = RepositoryEndpointPolicy.ValidateAndCreate(
-                        owner, actualOwner, name, fullName, htmlUrl);
-                    if (id <= 0 || !ids.Add(id) || size < 0 || ownerId != transport.BoundAccountId
-                        || !endpoint.Allowed || !names.Add(name))
+                    RepositoryEndpointValidation endpoint = ownScope
+                        ? RepositoryEndpointPolicy.ValidateAndCreate(owner, actualOwner, name, fullName, htmlUrl)
+                        : RepositoryEndpointPolicy.ValidateAndCreateForScope(owner, actualOwner, name, fullName, htmlUrl);
+                    bool ownerAllowed = ownScope
+                        ? ownerId == transport.BoundAccountId && string.Equals(actualOwner, owner, StringComparison.OrdinalIgnoreCase)
+                        : collaborators || string.Equals(actualOwner, scopeOwner, StringComparison.OrdinalIgnoreCase);
+                    if (id <= 0 || !ids.Add(id) || size < 0 || ownerId <= 0 || !ownerAllowed
+                        || !endpoint.Allowed || !names.Add(endpoint.CanonicalNameWithOwner))
                         throw new JsonException();
                     repositories.Add(new(id, name, endpoint.CanonicalNameWithOwner, endpoint.CanonicalHtmlUrl,
                         isPrivate, archived, fork, wiki, updated, size, name, "active"));

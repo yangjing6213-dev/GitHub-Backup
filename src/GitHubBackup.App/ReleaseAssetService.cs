@@ -15,8 +15,11 @@ internal sealed class ReleaseAssetService(IGitHubHttpTransport transport)
     private static readonly StringComparer Names = StringComparer.OrdinalIgnoreCase;
 
     internal async Task<ReleaseInventory> ReadInventoryAsync(string owner, string repository, CancellationToken token)
+        => await ReadInventoryAsync(owner, owner, repository, token).ConfigureAwait(false);
+
+    internal async Task<ReleaseInventory> ReadInventoryAsync(string authenticatedOwner, string repositoryOwner, string repository, CancellationToken token)
     {
-        if (transport.BoundAccountId <= 0 || !string.Equals(owner, transport.BoundLogin, StringComparison.OrdinalIgnoreCase))
+        if (transport.BoundAccountId <= 0 || !string.Equals(authenticatedOwner, transport.BoundLogin, StringComparison.OrdinalIgnoreCase))
             throw new ReleaseException("RELEASE_IDENTITY_REJECTED");
         var releases = new List<ReleaseRecord>();
         var releaseIds = new HashSet<long>();
@@ -25,7 +28,7 @@ internal sealed class ReleaseAssetService(IGitHubHttpTransport transport)
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            GitHubRequest request = GitHubRequest.ForMetadata(owner, repository, "releases.pages.json", page == 1 ? null : page);
+            GitHubRequest request = GitHubRequest.ForMetadata(authenticatedOwner, repositoryOwner, repository, "releases.pages.json", page == 1 ? null : page);
             using GitHubResponse response = await transport.SendAsync(request, token).ConfigureAwait(false);
             if (response.StatusCode != 200) throw new ReleaseException("RELEASE_INVENTORY_INVALID");
             using var memory = new MemoryStream();
@@ -65,9 +68,13 @@ internal sealed class ReleaseAssetService(IGitHubHttpTransport transport)
 
     internal async Task<ReleasePlan> PlanAsync(string repositoryDirectory, string owner, string repository,
         ReleaseInventory inventory, CancellationToken token)
+        => await PlanAsync(repositoryDirectory, owner, owner, repository, inventory, token).ConfigureAwait(false);
+
+    internal async Task<ReleasePlan> PlanAsync(string repositoryDirectory, string authenticatedOwner, string repositoryOwner,
+        string repository, ReleaseInventory inventory, CancellationToken token)
     {
-        _ = GitHubRequest.ForMetadata(owner, repository, "releases.pages.json");
-        if (transport.BoundAccountId <= 0 || !string.Equals(owner, transport.BoundLogin, StringComparison.OrdinalIgnoreCase))
+        _ = GitHubRequest.ForMetadata(authenticatedOwner, repositoryOwner, repository, "releases.pages.json");
+        if (transport.BoundAccountId <= 0 || !string.Equals(authenticatedOwner, transport.BoundLogin, StringComparison.OrdinalIgnoreCase))
             throw new ReleaseException("RELEASE_IDENTITY_REJECTED");
         string root = NativeFileSystem.CanonicalPath(repositoryDirectory);
         if (Directory.Exists(root)) AuditTree(root);
@@ -105,13 +112,13 @@ internal sealed class ReleaseAssetService(IGitHubHttpTransport transport)
                     && await ContentIntegrity.MatchesFileAsync(Path.Combine(tagDirectory, old.LocalName), expected, token).ConfigureAwait(false);
                 int assetGeneration = reused ? old!.Generation : checked((old?.Generation ?? 0) + 1);
                 string localName = reused ? old!.LocalName : Allocate(occupiedAssets, asset.Name, "a", asset.Id, ref assetGeneration);
-                assets.Add(new(new AssetIdentity(owner, repository, asset.Id), asset,
+                    assets.Add(new(new AssetIdentity(repositoryOwner, repository, asset.Id), asset,
                     Path.Combine(tagDirectory, localName), localName, assetGeneration, reused));
                 if (!reused) changed = checked(changed + asset.Size);
             }
             output.Add(new(release, localTag, generation, sameTag, assets));
         }
-        var plan = new ReleasePlan(root, owner, repository, output, changed);
+        var plan = new ReleasePlan(root, repositoryOwner, repository, output, changed) { AuthenticatedOwner = authenticatedOwner };
         ValidatePlan(plan);
         return plan;
     }
@@ -150,7 +157,7 @@ internal sealed class ReleaseAssetService(IGitHubHttpTransport transport)
                 AssetDownloadResult? result = null;
                 await AtomicFile.WriteAsync(asset.FullPath, async (output, ct) =>
                 {
-                    using GitHubResponse response = await transport.DownloadAssetAsync(asset.Identity, ct).ConfigureAwait(false);
+                    using GitHubResponse response = await transport.DownloadAssetAsync(asset.Identity, plan.AuthenticatedOwner, ct).ConfigureAwait(false);
                     result = await ContentIntegrity.CopyAsync(response, output, asset.FullPath, expected, ct).ConfigureAwait(false);
                 }, token, assetHooks, requireNew: true).ConfigureAwait(false);
                 results.Add(result!);

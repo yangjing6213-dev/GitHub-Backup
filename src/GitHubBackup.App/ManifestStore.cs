@@ -72,7 +72,7 @@ internal sealed class ManifestStore
         using PathLease lease = SummaryStore.RequirePrivateDirectory(Path.GetDirectoryName(canonical)!);
         using JsonDocument document = await MetadataJson.ReadDocumentAsync(canonical, cancellationToken).ConfigureAwait(false);
         JsonElement outer = document.RootElement;
-        JsonValueKind pageKind = string.Equals(Path.GetFileName(canonical), "workflows.pages.json", StringComparison.Ordinal)
+        JsonValueKind pageKind = Path.GetFileName(canonical) is "workflows.pages.json" or "actions-runs.pages.json" or "actions-artifacts.pages.json"
             ? JsonValueKind.Object : JsonValueKind.Array;
         if (outer.ValueKind != JsonValueKind.Array || outer.EnumerateArray().Any(page => page.ValueKind != pageKind))
             throw new JsonException("Pages have an invalid outer shape.");

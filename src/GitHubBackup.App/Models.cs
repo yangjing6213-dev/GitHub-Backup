@@ -29,6 +29,11 @@ internal sealed record AppSettings(string Owner, string BackupRoot, NetworkMode 
 {
     internal int? ApiCredentialConsentVersion { get; init; }
     internal string? ApiCredentialConsentLogin { get; init; }
+    // Empty scope keeps the safest default: repositories owned by the signed-in account only.
+    internal string RepositoryScope { get; init; } = "";
+    internal bool IncludeCollaboratorRepositories { get; init; }
+    internal bool IncludeActionsArtifacts { get; init; }
+    internal long ActionsMaxBytes { get; init; } = ActionsArchiveService.DefaultMaxBytes;
     internal bool HasApiCredentialConsentFor(string login) => ApiCredentialConsentVersion == 1
         && AuthConfigLease.IsLogin(Owner) && AuthConfigLease.IsLogin(login)
         && string.Equals(Owner, login, StringComparison.OrdinalIgnoreCase)
@@ -82,7 +87,10 @@ internal sealed record ReleaseAssetGeneration(AssetIdentity Identity, ReleaseAss
 internal sealed record ReleaseGeneration(ReleaseRecord Release, string LocalTag, int Generation,
     bool Reused, IReadOnlyList<ReleaseAssetGeneration> Assets);
 internal sealed record ReleasePlan(string RepositoryDirectory, string Owner, string Repository,
-    IReadOnlyList<ReleaseGeneration> Generations, long ChangedBytes);
+    IReadOnlyList<ReleaseGeneration> Generations, long ChangedBytes)
+{
+    internal string AuthenticatedOwner { get; init; } = Owner;
+}
 internal sealed class ReleaseException(string code) : IOException(code)
 {
     internal string Code { get; } = code;

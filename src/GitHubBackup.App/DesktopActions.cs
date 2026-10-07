@@ -11,6 +11,8 @@ internal sealed record DesktopActions(
     Func<AppSettings, CancellationToken, Task<SummaryReadResult>> ReadHistory,
     Func<AppSettings, CancellationToken, Task<ValidatedLogDocument>> ReadLatestLog,
     Func<AppSettings, CancellationToken, Task<SafeOpenResult>> OpenBackupFolder,
+    Func<AppSettings, string, CancellationToken, Task<RestoreReport>> RestoreLatest,
+    Func<AppSettings, string, CancellationToken, Task<SecondaryCopyReport>> SecondaryCopy,
     Func<AppSettings, CancellationToken, Task<DiagnosticDisplayPreview>> PreviewDiagnostics,
     Func<AppSettings, string, string, bool, CancellationToken, Task<DiagnosticSaveStatus>> SaveDiagnostics,
     Func<CancellationToken, Task<ToolInventory>> DetectTools,
@@ -36,6 +38,8 @@ internal sealed class DesktopWorkflow
     private readonly IGitHubCredentialReader credentials;
     private readonly AppPaths paths;
     private readonly SafeOpenService safeOpen;
+    private readonly SecondaryCopyService secondaryCopy;
+    private readonly ScheduleStore schedule;
     private readonly DependencySetupService dependencies;
     private readonly Func<OperationJob, CancellationToken, Task<ToolInventory>> detectTools;
     private readonly Func<BackupMode, AppSettings, OperationJob, CancellationToken, Task<PreflightCheckResult>> check;
@@ -56,6 +60,8 @@ internal sealed class DesktopWorkflow
         preflight = new(auth, runner, detector.DetectAsync, environment, proxies, new());
         backup = new(runner, paths, coordinator: coordinator);
         safeOpen = new(runner);
+        secondaryCopy = new();
+        schedule = new(paths);
         this.detectTools = detectTools ?? detector.DetectAsync;
         this.check = check ?? ((mode, selected, job, token) => preflight.CheckNativeAsync(mode, selected, job, credentials, token));
         this.cleanupPreflight = cleanupPreflight ?? preflight.RetryCleanupAsync;
@@ -70,9 +76,29 @@ internal sealed class DesktopWorkflow
         (selected, token) => new SummaryStore(paths).ReadLatestAsync(Path.Combine(selected.BackupRoot, selected.Owner), paths.DiagnosticFallbackRoot, token, selected.Owner),
         ReadLatestLogAsync,
         (selected, token) => RunViewAsync(coordinator, (job, cancellation) => safeOpen.OpenBackupFolderAsync(selected.BackupRoot, job, cancellation), token),
+        RestoreLatestAsync,
+        SecondaryCopyAsync,
         PreviewDiagnosticsAsync, SaveDiagnosticsAsync,
         token => { latestCheck = null; return RunViewAsync(coordinator, detectTools, token); },
         InstallAsync, SelectRootAsync, RepairAsync);
+
+    internal Task<BackupSchedule> LoadScheduleAsync(CancellationToken token) => schedule.LoadAsync(token);
+    internal Task SaveScheduleAsync(BackupSchedule value, CancellationToken token) => schedule.SaveAsync(value, token);
+
+    private Task<RestoreReport> RestoreLatestAsync(AppSettings selected, string destinationParent, CancellationToken token) =>
+        RunViewAsync(coordinator, async (job, cancellation) =>
+        {
+            if (!AuthConfigLease.IsLogin(selected.Owner)) throw new ArgumentException("OWNER_INVALID");
+            ToolInventory tools = await detectTools(job, cancellation).ConfigureAwait(false);
+            if (tools.Git is not { IsSupported: true } git) throw new InvalidOperationException("RESTORE_GIT_REQUIRED");
+            string ownerRoot = OwnerRoot(selected);
+            var environment = ChildEnvironmentBuilder.CreateCurrentBase([Path.GetDirectoryName(git.AbsolutePath)!]);
+            return await new RestoreService(new ProcessRunner()).RestoreLatestAsync(ownerRoot, selected.Owner,
+                destinationParent, git, environment, job, cancellation).ConfigureAwait(false);
+        }, token);
+
+    private Task<SecondaryCopyReport> SecondaryCopyAsync(AppSettings selected, string destinationParent, CancellationToken token) =>
+        RunViewAsync(coordinator, (job, cancellation) => secondaryCopy.CopyLatestAsync(OwnerRoot(selected), selected.Owner, destinationParent, job, cancellation), token);
 
     internal static async Task<T> RunViewAsync<T>(RunCoordinator coordinator, Func<OperationJob, CancellationToken, Task<T>> work, CancellationToken token)
     {

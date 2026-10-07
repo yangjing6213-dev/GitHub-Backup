@@ -26,6 +26,32 @@ public sealed class RepositoryDiscoveryServiceTests
     }
 
     [TestMethod]
+    public async Task Explicit_organization_scope_accepts_org_owner_and_uses_org_endpoint()
+    {
+        Assert.IsTrue(RepositoryEndpointPolicy.ValidateAndCreateForScope("fixture-user", "acme", "repo", "acme/repo", "https://github.com/acme/repo").Allowed);
+        var transport = new FixtureTransport(_ => ("[" + Item(1, 42, "acme", "repo") + "]", null));
+
+        IReadOnlyList<RepositoryDescriptor> found = await new RepositoryDiscoveryService(transport)
+            .DiscoverAsync("fixture-user", "acme", false, default);
+
+        Assert.AreEqual("acme/repo", found.Single().NameWithOwner);
+        Assert.AreEqual("/orgs/acme/repos", transport.Paths.Single());
+    }
+
+    [TestMethod]
+    public async Task Explicit_collaborator_scope_accepts_a_different_owner()
+    {
+        Assert.IsTrue(RepositoryEndpointPolicy.ValidateAndCreateForScope("fixture-user", "partner", "repo", "partner/repo", "https://github.com/partner/repo").Allowed);
+        var transport = new FixtureTransport(_ => ("[" + Item(1, 42, "partner", "repo") + "]", null));
+
+        IReadOnlyList<RepositoryDescriptor> found = await new RepositoryDiscoveryService(transport)
+            .DiscoverAsync("fixture-user", "", true, default);
+
+        Assert.AreEqual("partner/repo", found.Single().NameWithOwner);
+        Assert.AreEqual("/user/repos", transport.Paths.Single());
+    }
+
+    [TestMethod]
     [DataRow("{\"id\":1,\"name\":\"repo\",\"full_name\":\"other/repo\",\"html_url\":\"https://github.com/other/repo\",\"owner\":{\"login\":\"other\"},\"size\":1,\"private\":false,\"archived\":false,\"fork\":false,\"has_wiki\":true}")]
     [DataRow("{\"id\":1,\"name\":\"repo\",\"full_name\":\"fixture-user/repo\",\"html_url\":\"https://github.com/fixture-user/repo?token=x\",\"owner\":{\"login\":\"fixture-user\"},\"size\":1,\"private\":false,\"archived\":false,\"fork\":false,\"has_wiki\":true}")]
     [DataRow("{\"id\":1,\"name\":\"repo\",\"full_name\":\"fixture-user/repo\",\"html_url\":\"https://github.com/fixture-user/repo\",\"owner\":{\"login\":\"fixture-user\"},\"size\":-1,\"private\":false,\"archived\":false,\"fork\":false,\"has_wiki\":true}")]
@@ -91,20 +117,23 @@ public sealed class RepositoryDiscoveryServiceTests
             new RepositoryDiscoveryService(transport).DiscoverAsync("fixture-user", default))).Code);
     }
 
-    private static string Item(int id, long ownerId = 7) => "{\"id\":" + id + ",\"name\":\"repo" + id
-        + "\",\"full_name\":\"fixture-user/repo" + id
-        + "\",\"html_url\":\"https://github.com/fixture-user/repo" + id
-        + "\",\"owner\":{\"login\":\"fixture-user\",\"id\":" + ownerId + "},\"size\":42,\"private\":true,\"archived\":true,\"fork\":true,\"has_wiki\":false,\"updated_at\":\"2026-09-20T00:00:00Z\"}";
+    private static string Item(int id, long ownerId = 7, string owner = "fixture-user", string? name = null) => "{\"id\":" + id + ",\"name\":\"" + (name ?? "repo" + id)
+        + "\",\"full_name\":\"" + owner + "/" + (name ?? "repo" + id)
+        + "\",\"html_url\":\"https://github.com/" + owner + "/" + (name ?? "repo" + id)
+        + "\",\"owner\":{\"login\":\"" + owner + "\",\"id\":" + ownerId + "},\"size\":42,\"private\":true,\"archived\":true,\"fork\":true,\"has_wiki\":false,\"updated_at\":\"2026-09-20T00:00:00Z\"}";
 
     private sealed class FixtureTransport(Func<int, (string Body, int? Next)> response, long? declaredLength = null) : IGitHubHttpTransport
     {
         internal int[] Pages => pages.ToArray();
+        internal IReadOnlyList<string> Paths => paths;
         private readonly List<int> pages = [];
+        private readonly List<string> paths = [];
         public string BoundLogin => "fixture-user";
         public long BoundAccountId => 7;
         public Task<GitHubResponse> SendAsync(GitHubRequest request, CancellationToken token)
         {
             pages.Add(request.Page);
+            paths.Add(request.Path);
             var (body, next) = response(request.Page);
             return Task.FromResult(new GitHubResponse(200, declaredLength is null ? new Dictionary<string,string>()
                 : new Dictionary<string,string> { ["Content-Length"] = declaredLength.Value.ToString() },

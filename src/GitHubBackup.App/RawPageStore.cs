@@ -24,9 +24,13 @@ internal sealed class RawPageStore(string metadataDirectory)
 
     internal Task<RawPageWriteResult> SaveMetadataAsync(string owner, string repository, string fileName,
         IGitHubHttpTransport transport, CancellationToken token)
+        => SaveMetadataAsync(owner, owner, repository, fileName, transport, token);
+
+    internal Task<RawPageWriteResult> SaveMetadataAsync(string authenticatedOwner, string repositoryOwner, string repository, string fileName,
+        IGitHubHttpTransport transport, CancellationToken token)
     {
         PageEnvelope envelope = EnvelopeFor(fileName);
-        if (transport.BoundAccountId <= 0 || !string.Equals(transport.BoundLogin, owner, StringComparison.OrdinalIgnoreCase))
+        if (transport.BoundAccountId <= 0 || !string.Equals(transport.BoundLogin, authenticatedOwner, StringComparison.OrdinalIgnoreCase))
             throw new HttpTransferException("HTTP_REPOSITORY_IDENTITY_REJECTED");
         return SaveAsync(fileName, envelope, async (output, ct) =>
         {
@@ -34,7 +38,7 @@ internal sealed class RawPageStore(string metadataDirectory)
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                GitHubRequest request = GitHubRequest.ForMetadata(owner, repository, fileName, page == 1 ? null : page);
+                GitHubRequest request = GitHubRequest.ForMetadata(authenticatedOwner, repositoryOwner, repository, fileName, page == 1 ? null : page);
                 using GitHubResponse response = await transport.SendAsync(request, ct).ConfigureAwait(false);
                 if (page != 1) await output.WriteAsync(","u8.ToArray(), ct).ConfigureAwait(false);
                 await WritePageAsync(output, response, envelope, ct).ConfigureAwait(false);
@@ -132,7 +136,7 @@ internal sealed class RawPageStore(string metadataDirectory)
     private static PageEnvelope EnvelopeFor(string fileName) => fileName switch
     {
         "repository.json" => PageEnvelope.SingleObject,
-        "workflows.pages.json" => PageEnvelope.ObjectPages,
+        "workflows.pages.json" or "actions-runs.pages.json" or "actions-artifacts.pages.json" => PageEnvelope.ObjectPages,
         "issues.pages.json" or "pull-requests.pages.json" or "issue-comments.pages.json" or
             "review-comments.pages.json" or "releases.pages.json" or "labels.pages.json" or
             "milestones.pages.json" => PageEnvelope.ArrayPages,

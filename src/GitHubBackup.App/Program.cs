@@ -29,7 +29,8 @@ internal static class Program
                 return;
             }
             var paths = AppPaths.Create(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
-            using var form = new MainForm(new DesktopWorkflow(paths).Actions);
+            var workflow = new DesktopWorkflow(paths);
+            using var form = new MainForm(workflow.Actions, workflow.LoadScheduleAsync, workflow.SaveScheduleAsync);
             form.Shown += (_, _) => instance.BindActivation(form.ActivateFromSecondaryInstance);
             Application.Run(form);
         }

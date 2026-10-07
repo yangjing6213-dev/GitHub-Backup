@@ -66,6 +66,39 @@ public sealed class SettingsStoreTests
     }
 
     [TestMethod]
+    public async Task Actions_options_roundtrip_only_when_explicitly_enabled()
+    {
+        using var root = new StorageTestRoot();
+        AppPaths paths = AppPaths.Create(root.Path);
+        var store = new SettingsStore(paths);
+        var settings = new AppSettings("fixture-user", root.Child("backups"), NetworkMode.Auto)
+        {
+            IncludeActionsArtifacts = true,
+            ActionsMaxBytes = 64L * 1024 * 1024
+        };
+
+        await store.SaveAsync(settings, CancellationToken.None);
+        using JsonDocument json = JsonDocument.Parse(await File.ReadAllTextAsync(paths.SettingsFile));
+        Assert.IsTrue(json.RootElement.GetProperty("includeActionsArtifacts").GetBoolean());
+        Assert.AreEqual(64L * 1024 * 1024, json.RootElement.GetProperty("actionsMaxBytes").GetInt64());
+        Assert.AreEqual(settings, (await store.LoadAsync(CancellationToken.None)).Settings);
+    }
+
+    [TestMethod]
+    public async Task Invalid_actions_limit_is_rejected_before_writing()
+    {
+        using var root = new StorageTestRoot();
+        var store = new SettingsStore(AppPaths.Create(root.Path));
+        var settings = new AppSettings("fixture-user", root.Child("backups"), NetworkMode.Auto)
+        {
+            IncludeActionsArtifacts = true,
+            ActionsMaxBytes = 1
+        };
+
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => store.SaveAsync(settings, CancellationToken.None));
+    }
+
+    [TestMethod]
     public async Task Old_settings_and_changed_account_or_version_have_no_consent()
     {
         using var root = new StorageTestRoot();

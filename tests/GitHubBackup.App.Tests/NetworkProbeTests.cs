@@ -13,6 +13,9 @@ public sealed class NetworkProbeTests
     public void Native_status_uses_only_status_and_official_remaining_header(int status, string? remaining, int expected) =>
         Assert.AreEqual((NetworkFailureKind)expected, NetworkProbe.ClassifyHttpStatus(status, remaining));
     [TestMethod]
+    public void Secondary_limit_header_marks_forbidden_as_rate_limited_even_when_primary_quota_remains() =>
+        Assert.AreEqual(NetworkFailureKind.RateLimited, NetworkProbe.ClassifyHttpStatus(403, "1", "2"));
+    [TestMethod]
     [DataRow("gh: Bad credentials (HTTP 401)",5)]
     [DataRow("gh: Forbidden (HTTP 403)",6)]
     [DataRow("gh: Not Found (HTTP 404)",7)]

@@ -388,6 +388,46 @@ public sealed class BackupOrchestratorTests
     }
 
     [TestMethod]
+    public async Task Rate_limit_writes_progress_and_next_run_skips_completed_repositories()
+    {
+        await using var first = await OrchestrationFixture.CreateAsync(repositoryNames: ["repo-one", "repo-two"]);
+        string backupRoot = first.Local.BackupRoot;
+        first.Http.Override = (path, _) =>
+        {
+            if (path == "/repos/fixture-user/repo-two/issues")
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent("rate limited") };
+                response.Headers.TryAddWithoutValidation("Retry-After", "60");
+                response.Headers.TryAddWithoutValidation("X-RateLimit-Remaining", "0");
+                return Task.FromResult<HttpResponseMessage?>(response);
+            }
+            return Task.FromResult<HttpResponseMessage?>(null);
+        };
+        BackupRunResult result = await first.Orchestrator.RunAsync(first.Request(BackupMode.Daily), default);
+        Assert.AreEqual(RunStatus.Partial, result.Summary.Status);
+        Assert.AreEqual("HTTP_RATE_LIMITED", result.Summary.ErrorCode);
+        Assert.IsTrue(File.Exists(Path.Combine(first.Local.OwnerRoot, "progress", "backup-progress.json")));
+        BackupCheckpoint? saved = await new BackupCheckpointStore().ReadAsync(first.Local.OwnerRoot, "fixture-user", default);
+        Assert.IsNotNull(saved);
+        Assert.IsTrue(saved.PausedByRateLimit);
+        CollectionAssert.Contains(saved.CompletedRepositories.ToArray(), "repo-one");
+        Assert.Contains("/repos/fixture-user/repo-one/issues", first.Http.Paths);
+        Assert.IsFalse(first.Http.Paths.Any(path => path == "/repos/fixture-user/repo-two/pulls"));
+
+        await using (var second = await OrchestrationFixture.CreateAsync(backupRoot, repositoryNames: ["repo-one", "repo-two"]))
+        {
+            BackupCheckpoint? beforeResume = await new BackupCheckpointStore().ReadAsync(second.Local.OwnerRoot, "fixture-user", default);
+            Assert.IsNotNull(beforeResume);
+            Assert.IsTrue(beforeResume.PausedByRateLimit);
+            CollectionAssert.Contains(beforeResume.CompletedRepositories.ToArray(), "repo-one");
+            BackupRunResult resumed = await second.Orchestrator.RunAsync(second.Request(BackupMode.Daily), default);
+            Assert.AreNotEqual(RunStatus.Fail, resumed.Summary.Status);
+            Assert.IsFalse(second.Http.Paths.Any(path => path.StartsWith("/repos/fixture-user/repo-one", StringComparison.Ordinal)), string.Join("|", second.Http.Paths));
+            Assert.IsTrue(second.Http.Paths.Any(path => path == "/repos/fixture-user/repo-two/issues"));
+        }
+    }
+
+    [TestMethod]
     public async Task Session_cleanup_failure_retains_owner_until_explicit_retry()
     {
         await using var f = await OrchestrationFixture.CreateAsync();

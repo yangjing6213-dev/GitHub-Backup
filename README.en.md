@@ -4,13 +4,13 @@
 
 > **You made something with AI. Keep a local copy, too.** If your GitHub account is suspended or inaccessible, you may not be able to retrieve the projects stored there. Back up your own repositories and version history while you still have access to reduce the risk of losing them.
 >
-> [Download the Windows v4 preview](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v4) · [Quick start](#6-installation-and-quick-start) · [About the author](#13-about-the-author)
+> [Download the Windows v5 preview](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v5) · [Quick start](#6-installation-and-quick-start) · [About the author](#13-about-the-author)
 >
 > **Back up in advance:** this app cannot restore account access or retrieve files from an account you can no longer access.
 
 If you use AI to build a website, tool, or small app and keep it in your own GitHub account, this app can save its code, version history, and supported project records locally.
 
-**This is an unsigned Windows preview, not a production release.** The v4 installer passed static checks and was installed on the development PC, where the user confirmed a normal backup completed. Clean-PC use and backup restoration have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions, notes, and checksums that are actually available; the older preview ZIP does not include the v4 fixes. Do not rely on a preview as the only copy of important files.
+**This is an unsigned Windows preview, not a production release.** The v5 installer passed static checks and was installed on the development PC after removing the old version; settings were preserved. Clean-PC use, installation on another computer, and backup restoration have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions, notes, and checksums that are actually available; the older preview ZIP does not include this iteration's features. Do not rely on a preview as the only copy of important files.
 
 Contents: [About the project](#1-what-is-this-project) · [Example output](#2-what-does-a-backup-look-like) · [Who it is for](#3-who-is-it-for) · [Quick start](#6-installation-and-quick-start) · [Daily use](#7-how-to-use-it) · [Cautions and FAQ](#10-cautions-and-faq) · [Version status](#11-version-status) · [About the author](#13-about-the-author)
 
@@ -20,7 +20,7 @@ This is a local backup app under development. It is not a Skill to install in an
 
 You enter your own GitHub account and a local destination, sign in through a browser, and approve the requested backup access. After checking the environment, the app reads repositories owned by that account and saves code, version history, and supported project records locally.
 
-It is not a downloader for arbitrary GitHub links, and it does not automatically upload backups back to GitHub.
+It is not a downloader for arbitrary GitHub links, and it does not automatically upload backups back to GitHub. It addresses a practical risk: if a GitHub account is suspended, restricted, or temporarily inaccessible, projects stored only on GitHub may be hard to retrieve. Keeping a local copy in advance gives you the code, history, and saved records needed to keep working.
 
 ## 2. What does a backup look like?
 
@@ -37,6 +37,8 @@ D:\GitHub-Backups\<your-account>\
 │  ├─ issues.pages.json                   Issue records
 │  ├─ pull-requests.pages.json             Pull request records
 │  └─ releases.pages.json                 Release information
+├─ actions\<repository>\                 Optional Actions runs, logs, and artifacts
+├─ progress\backup-progress.json          Resume point after a rate-limit pause
 ├─ manifests\summary-<run-id>.json         Run summary
 └─ logs\backup-<run-id>.log                Run log
 ```
@@ -56,7 +58,7 @@ The “Full backup” mode also saves supported release assets under `releases\<
 ### Not a good fit
 
 - People who only want to paste another person's repository URL and download that one project: the desktop app works with repositories owned by the signed-in account.
-- People who need a validated installer, unattended scheduled backups, or one-click restoration to a remote repository: these are not delivered capabilities yet.
+- People who need a Windows background service that runs while the app is closed, or one-click restoration to a remote repository: the current scheduler checks missed plans when the app starts, and restoration writes to a new local folder.
 - People using macOS, Linux, Windows on ARM64, or a network drive as the destination: the current build targets Windows x64 and a local fixed disk.
 
 You do not need programming skills, but you do need to download a file, choose a folder, and sign in to your own GitHub account in a browser. The current preview has additional tool requirements described below.
@@ -69,6 +71,8 @@ Based on the current code, backup output includes:
 - Wiki mirrors when a repository has a Wiki.
 - Repository details, issues, pull requests, comments, labels, milestones, release information, workflow records, and other supported records as `JSON` files.
 - Release assets and an asset index in Full backup mode.
+- Repositories in an explicitly selected organization or collaborator scope; the default remains repositories owned by the signed-in account.
+- Optional GitHub Actions run logs and build artifacts, with a per-repository size limit and explicit messages for expired or over-limit items.
 - A repository manifest, run summary, and log for each run.
 
 The default backup root is `D:\GitHub-Backups`; you can choose another eligible folder in the app. Actual files are organized below it by account. Avoid editing mirrors and indexes by hand because that may interfere with later updates.
@@ -79,7 +83,7 @@ App settings and diagnostic files are stored separately under `%LOCALAPPDATA%\Gi
 
 Manual backups often require separate steps for repositories, release files, and result checks. The desktop app brings them together: check tools and the destination, choose Daily or Full mode, and review the outcome.
 
-Daily mode skips release assets and is intended for recurring updates. Full mode includes release assets. Network settings are limited to the current backup process or a temporary configuration so that a run does not leave a global Git setting behind.
+Daily mode skips release assets and is intended for recurring updates. Full mode includes release assets. Before starting, you can select an organization or collaborator scope, enable Actions data, set a daily or weekly startup plan, or validate and copy a completed backup to a second local folder. Network settings are limited to the current backup process or a temporary configuration so that a run does not leave a global Git setting behind.
 
 You still need to sign in, approve necessary actions, have a working network and enough disk space, and check the summary. The project does not support claims that every item is guaranteed to succeed or that it saves a particular amount of time.
 
@@ -106,7 +110,7 @@ The local code does not require a paid AI model. Access to GitHub, network servi
 
 Use the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) to find installers with clear release notes and checksums. The page may also retain an older preview ZIP, which does not include the latest installer fixes. Treat a file as the fixed installer only when its release notes identify `GitHubBackup-setup.exe` and provide the matching SHA-256 value. If you cannot find that file, do not mistake the older ZIP for the latest version or construct a download URL.
 
-The installer supports Windows 11 25H2 x64 (build 26200). Run it as a normal user, not as administrator. It installs to the fixed location `%LOCALAPPDATA%\Programs\GitHubBackupTool`, creates Desktop and Start Menu shortcuts, and registers an uninstall entry in the current user's Installed apps list. Uninstall removes only verified app-owned files and shortcuts; it preserves backups, settings, logs, and credentials.
+The installer supports Windows 11 25H2 x64 (build 26200). Run it as a normal user, not as administrator. It installs to the fixed location `%LOCALAPPDATA%\Programs\GitHubBackupTool`, creates a Start Menu shortcut, and registers an uninstall entry in the current user's Installed apps list. Uninstall removes only verified app-owned files and shortcuts; it preserves backups, settings, logs, and credentials.
 
 If the installer reports an older version, follow its instructions to open the install folder and run `Uninstall.exe`, then rerun the new installer. Do not delete installation files manually. The installer is unsigned, so Windows may display an “Unknown publisher” warning. Verify the file's source; do not turn off Windows security protections.
 
@@ -126,6 +130,7 @@ This older ZIP does not include the newly fixed installer; its app still runs di
 4. Read the notices about saving original data and credential use. After agreeing, click “Sign in with browser”; the app will try to open GitHub's official device sign-in page. If it does not open, visit `https://github.com/login/device` and enter the one-time code shown in the app. Then recheck the environment. This uses the GitHub credential store shared by the current Windows user and may affect the account used by other `gh` tools.
 5. Start with “Daily backup”. Once the environment check passes and “Start backup” is enabled, click it. **The app processes repositories owned by this account, not just one sample project.**
 6. When it finishes, click “Open backup folder” and “View latest log”. Check the run summary instead of assuming success just because a folder exists.
+7. When needed, use “Verify and restore to a new folder” to check Git history and create a usable local working copy, or “Create a second local copy” to preserve another verified copy. Neither operation overwrites the primary backup.
 
 If a check fails, address the item shown in the app. Do not lower security settings just to enable a button.
 
@@ -140,9 +145,9 @@ dotnet publish src/GitHubBackup.App/GitHubBackup.App.csproj --configuration Rele
 
 The current desktop app is an internal development preview. File metadata shows `1.0.0.0`; this is the executable's file version, not a validated stable `v1.0.0` release. The root [VERSION.txt](VERSION.txt) value `4.0.0-one-click-isolated-ssh443` applies only to earlier scripts.
 
-The v4 installer and bundled Windows x64 app passed static file verification. The old version was removed, v4 was installed on the development PC, and the user confirmed a normal backup completed. The related focused tests passed 269/269. This does not verify use on a clean PC or restoration of a backup; see the [public verification record](docs/verification/setup-installer.md).
+The v5 installer and bundled Windows x64 app passed static file verification. The old version was removed, v5 was installed on the development PC, and the installed files, shortcut, uninstall entry, and preserved settings were checked. The full MSTest suite passed 1,199 tests, with 0 failures and 31 skips (1,230 total); the Release x64 rebuild completed with 0 warnings and 0 errors. This does not verify use on a clean PC or restoration of a backup; see the [public verification record](docs/verification/setup-installer.md).
 
-The latest setup preview is unsigned. Check its matching [GitHub Releases entry](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the available file and SHA-256 value. Real-profile installation and uninstall acceptance remain outstanding. Next, evaluate restore and legacy Git-configuration cleanup tools; planned features are not current capabilities. See the [public verification record](docs/verification/setup-installer.md).
+The latest setup preview is unsigned. Check its matching [GitHub Releases entry](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for the available file and SHA-256 value. Clean-PC use, other-account installation, and complete restoration remain outstanding. Fine-grained Actions selection and remote write-back restoration are future work, not current capabilities. See the [public verification record](docs/verification/setup-installer.md).
 
 ## 7. How to use it
 
@@ -216,11 +221,11 @@ For timeouts, refused connections, and resets, the app retries according to its 
 
 ### Can these backups replace all GitHub data?
 
-No. Workflow records are not the same as every Actions run log or build artifact, and submodules are not fetched recursively. The desktop app does not yet provide a completed restore flow, scheduled backups, or arbitrary repository filtering. A `PASS` result does not prove that every GitHub feature has a local copy.
+No. Submodules are not fetched recursively, and Actions logs or build artifacts are saved only when you enable them and the item is still available within the size limit. Organization and collaborator scope must be selected explicitly. Scheduling depends on the app starting and checking the plan; it is not a background service while the computer is off. Restoration creates a new local working folder and cannot recover data that was never backed up or is no longer accessible. A `PASS` result does not prove that every GitHub feature has a local copy.
 
 ### Can I install, use this commercially, or redistribute it?
 
-Original project source code is licensed under the [MIT License](LICENSE). You may copy, modify, distribute, and commercially use that source, provided you retain the copyright and license notices. This license covers only original project source code; third-party components retain their own licenses, and it does not grant rights to third-party trademarks or the author-introduction image. The v4 preview installer is unsigned. It was installed on the development PC, where the user confirmed a normal backup completed; clean-PC use and restore have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions and checksums that are actually available.
+Original project source code is licensed under the [MIT License](LICENSE). You may copy, modify, distribute, and commercially use that source, provided you retain the copyright and license notices. This license covers only original project source code; third-party components retain their own licenses, and it does not grant rights to third-party trademarks or the author-introduction image. The v5 preview installer is unsigned. It was installed on the development PC after removing the old version; clean-PC use and restore have not been verified. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for versions and checksums that are actually available.
 
 Third-party runtime and installer-build-tool licenses are listed in [NOTICE.txt](publish/Setup/NOTICE.txt). That notice is not a license for this project's source. Do not remove license notices distributed with the app or disable security protections to dismiss warnings.
 
@@ -228,11 +233,11 @@ Third-party runtime and installer-build-tool licenses are listed in [NOTICE.txt]
 
 The desktop app is an internal development preview. File metadata shows `1.0.0.0`; that is the executable's file version, not a validated stable `v1.0.0` release. The root [VERSION.txt](VERSION.txt) value `4.0.0-one-click-isolated-ssh443` applies only to earlier scripts.
 
-Completed with build evidence: the v4 Windows x64 installer was built and passed static file verification. The old version was uninstalled, v4 was installed on the development PC, and the user confirmed a normal backup completed. For eligible network interruptions, the app retries and may try the Windows system proxy. The related test set passed 269 tests.
+Completed with build evidence: the v5 Windows x64 installer was built and passed static file verification. The old version was uninstalled, v5 was installed on the development PC, and the installed files, shortcut, uninstall entry, and preserved settings were checked. The full MSTest suite passed 1,199 tests, with 0 failures and 31 skips (1,230 total); the Release x64 rebuild completed with 0 warnings and 0 errors. For eligible network interruptions, the app retries and may try the Windows system proxy.
 
-Not yet verified: use on a clean PC, installation on other computers or accounts, and whether a backup can be fully restored. The preview installer is unsigned; a successful backup on one PC does not prove that every account, network, or repository will work. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for an actually published download and SHA-256.
+This iteration adds and checks local restore to a new folder, rate-limit pause and resume, daily/weekly startup checks, a second local copy, organization/collaborator scope, and optional Actions logs/artifacts with size and expiry boundaries. Not yet verified: use on a clean PC, installation on other computers or accounts, real-account organization permission differences, and full restoration of every backup record. The preview installer is unsigned; a successful backup on one PC does not prove that every account, network, or repository will work. Check the [GitHub Releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) for an actually published download and SHA-256.
 
-The [releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) is the download source; choose only a version whose notes and SHA-256 match the installer fixes you need. Restore and legacy Git-configuration cleanup tools remain future work, not current capabilities. See the [installer verification record](docs/verification/setup-installer.md) for evidence and unverified areas.
+The [releases page](https://github.com/yangjing6213-dev/GitHub-Backup/releases) is the download source; choose only a version whose notes and SHA-256 match the installer fixes you need. Fine-grained Actions selection, remote write-back restoration, and legacy Git-configuration cleanup remain future work, not current capabilities. See the [installer verification record](docs/verification/setup-installer.md) and [iteration plan](docs/exec-plans/active/iterative-upgrade.md) for evidence and unverified areas.
 
 ## 12. Related projects
 

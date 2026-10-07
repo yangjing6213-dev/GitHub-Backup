@@ -2,14 +2,15 @@ namespace GitHubBackup.App;
 
 partial class MainForm
 {
-    internal TextBox OwnerTextBox = new(), BackupRootTextBox = new();
+    internal TextBox OwnerTextBox = new(), BackupRootTextBox = new(), RepositoryScopeTextBox = new();
     internal ComboBox ModeComboBox = new(), LanguageComboBox = new();
-    internal CheckBox ConsentCheckBox = new();
+    internal CheckBox ConsentCheckBox = new(), IncludeCollaboratorCheckBox = new(), IncludeActionsCheckBox = new();
+    internal NumericUpDown ActionsMaxSizeNumeric = new();
     internal Button BrowseButton = new(), LoginButton = new(), CheckButton = new(), StartButton = new(), CancelOperationButton = new(), RetryCleanupButton = new();
     internal Label StatusLabel = new(), ProgressLabel = new(), HistoryLabel = new();
-    internal Label LanguageLabel = new(), AppTitleLabel = new(), BuildNoticeLabel = new(), OwnerFieldLabel = new(), BackupRootFieldLabel = new(), ModeFieldLabel = new(), LiveLogTitleLabel = new();
+    internal Label LanguageLabel = new(), AppTitleLabel = new(), BuildNoticeLabel = new(), OwnerFieldLabel = new(), BackupRootFieldLabel = new(), ModeFieldLabel = new(), RepositoryScopeFieldLabel = new(), ActionsMaxSizeFieldLabel = new(), LiveLogTitleLabel = new();
     internal Label AboutNameLabel = new(), AboutRoleLabel = new(), AboutTaglineLabel = new();
-    internal Button LatestLogButton = new(), OpenFolderButton = new(), DiagnosticsButton = new(), ReleaseDownloadButton = new();
+    internal Button LatestLogButton = new(), OpenFolderButton = new(), RestoreButton = new(), ScheduleButton = new(), SecondaryCopyButton = new(), DiagnosticsButton = new(), ReleaseDownloadButton = new();
     internal Button DependencyButton = new(), SaveRootButton = new(), RepairButton = new();
     internal TextBox LiveLogTextBox = new();
     internal Label PrivacyLabel = new();
@@ -64,6 +65,18 @@ partial class MainForm
         ModeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         ModeComboBox.Items.AddRange(["日常备份（仓库、LFS、Wiki 和资料）", "完整备份（另含发布附件）"]); ModeComboBox.SelectedIndex = 0;
         Labelled(ModeFieldLabel, "备份方式(&M)", ModeComboBox);
+        Labelled(RepositoryScopeFieldLabel, "仓库范围（可选组织名）", RepositoryScopeTextBox);
+        RepositoryScopeTextBox.PlaceholderText = "留空：只备份当前账号自己的仓库"; RepositoryScopeTextBox.AccessibleName = "仓库范围（可选组织名）";
+        IncludeCollaboratorCheckBox.Text = "明确包含协作者仓库（可能扩大备份范围）"; IncludeCollaboratorCheckBox.AccessibleName = IncludeCollaboratorCheckBox.Text;
+        IncludeCollaboratorCheckBox.AutoSize = true; Add(IncludeCollaboratorCheckBox);
+        IncludeActionsCheckBox.Text = "保存 GitHub Actions 日志和构建附件（可选）"; IncludeActionsCheckBox.AccessibleName = IncludeActionsCheckBox.Text;
+        IncludeActionsCheckBox.AutoSize = true; Add(IncludeActionsCheckBox);
+        ActionsMaxSizeNumeric.Minimum = ActionsArchiveService.MinimumMaxBytes / (1024 * 1024);
+        ActionsMaxSizeNumeric.Maximum = ActionsArchiveService.MaximumMaxBytes / (1024 * 1024);
+        ActionsMaxSizeNumeric.Increment = 16; ActionsMaxSizeNumeric.Value = ActionsArchiveService.DefaultMaxBytes / (1024 * 1024);
+        ActionsMaxSizeNumeric.DecimalPlaces = 0; ActionsMaxSizeNumeric.ThousandsSeparator = true;
+        Labelled(ActionsMaxSizeFieldLabel, "Actions 单仓库上限（MB）", ActionsMaxSizeNumeric);
+        ActionsMaxSizeNumeric.AccessibleName = "Actions 单仓库上限（MB）";
         ConsentCheckBox.Text = "允许本应用读取此 Windows 用户凭据库中所选 GitHub 账号的凭据，仅在内存中用于 GitHub 身份验证和只读备份请求。本应用不另存、显示、记录或导出该凭据。";
         ConsentCheckBox.AccessibleName = "允许应用访问已登录账号";
         ConsentCheckBox.AutoSize = true; ConsentCheckBox.MaximumSize = new Size(720, 0); Add(ConsentCheckBox);
@@ -73,7 +86,7 @@ partial class MainForm
         Button(DependencyButton, "检测与安装依赖(&T)…"); Button(RepairButton, "检查并修复权限(&F)…");
         Button(StartButton, "开始备份(&S)"); Button(CancelOperationButton, "取消当前任务(&C)");
         Button(RetryCleanupButton, "重试清理(&R)");
-        Button(LatestLogButton, "查看最近日志(&V)…"); Button(OpenFolderButton, "打开备份目录(&O)"); Button(DiagnosticsButton, "预览并导出诊断(&X)…");
+        Button(LatestLogButton, "查看最近日志(&V)…"); Button(OpenFolderButton, "打开备份目录(&O)"); Button(RestoreButton, "验证并恢复到新目录(&R)…"); Button(ScheduleButton, "自动备份设置(&A)…"); Button(SecondaryCopyButton, "复制第二份本地副本(&C)…"); Button(DiagnosticsButton, "预览并导出诊断(&X)…");
         StatusIcon.Size = new(24, 24); StatusIcon.SizeMode = PictureBoxSizeMode.Zoom; StatusIcon.TabStop = false;
         StatusIcon.AccessibleName = "操作状态"; StatusIcon.Image = SystemIcons.Information.ToBitmap(); Add(StatusIcon);
         StatusLabel.AutoSize = true; StatusLabel.MaximumSize = new Size(720, 0); StatusLabel.Text = "需要允许应用访问已登录账号。"; Add(StatusLabel);
@@ -88,7 +101,7 @@ partial class MainForm
         ProgressLabel.AutoSize = true; ProgressLabel.MaximumSize = new Size(720, 0); ProgressLabel.Text = "尚未开始备份。"; Add(ProgressLabel);
         ActivityBar.Dock = DockStyle.Top; ActivityBar.AccessibleName = "当前操作活动状态"; Add(ActivityBar);
         Add(LiveLogTitleLabel); LiveLogTitleLabel.Text = "实时脱敏日志（最多保留末尾 2,000 行）"; LiveLogTitleLabel.AutoSize = true;
-        LiveLogTextBox.Multiline = true; LiveLogTextBox.ReadOnly = true; LiveLogTextBox.WordWrap = false; LiveLogTextBox.TabStop = false;
+        LiveLogTextBox.Multiline = true; LiveLogTextBox.ReadOnly = true; LiveLogTextBox.WordWrap = false; LiveLogTextBox.TabStop = true;
         LiveLogTextBox.ScrollBars = ScrollBars.Both; LiveLogTextBox.Dock = DockStyle.Top; LiveLogTextBox.Height = 160;
         LiveLogTextBox.AccessibleName = "实时脱敏日志"; LiveLogTextBox.BackColor = SystemColors.Window; LiveLogTextBox.ForeColor = SystemColors.WindowText; Add(LiveLogTextBox);
         BackupTab.Controls.Add(layout);
@@ -118,6 +131,10 @@ partial class MainForm
         OwnerTextBox.TextChanged += (_, _) => SettingsChanged(true);
         BackupRootTextBox.TextChanged += (_, _) => SettingsChanged(false);
         ModeComboBox.SelectedIndexChanged += (_, _) => SettingsChanged(false);
+        RepositoryScopeTextBox.TextChanged += (_, _) => SettingsChanged(false);
+        IncludeCollaboratorCheckBox.CheckedChanged += (_, _) => SettingsChanged(false);
+        IncludeActionsCheckBox.CheckedChanged += (_, _) => SettingsChanged(false);
+        ActionsMaxSizeNumeric.ValueChanged += (_, _) => SettingsChanged(false);
         ConsentCheckBox.CheckedChanged += (_, _) => SettingsChanged(false, true);
         BrowseButton.Click += async (_, _) => await ChooseRootAsync(true);
         SaveRootButton.Click += async (_, _) => await ChooseRootAsync(false);
@@ -130,6 +147,9 @@ partial class MainForm
         RetryCleanupButton.Click += async (_, _) => await RetryCleanupAsync();
         LatestLogButton.Click += async (_, _) => await ShowLatestLogAsync();
         OpenFolderButton.Click += async (_, _) => await OpenBackupFolderAsync();
+        RestoreButton.Click += async (_, _) => await RestoreLatestAsync();
+        ScheduleButton.Click += async (_, _) => await ConfigureScheduleAsync();
+        SecondaryCopyButton.Click += async (_, _) => await SecondaryCopyAsync();
         DiagnosticsButton.Click += async (_, _) => await ExportDiagnosticsAsync();
         LanguageComboBox.SelectedIndexChanged += (_, _) => ApplyLanguage();
         AuthorContactText.LinkClicked += (_, e) => OpenAuthorLink(e.LinkText);

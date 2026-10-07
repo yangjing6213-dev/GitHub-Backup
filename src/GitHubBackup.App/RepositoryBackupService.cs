@@ -22,20 +22,25 @@ internal sealed class BackupRunContext : IAsyncDisposable
     internal ToolInventory Tools=>session.Snapshot.Tools;
     internal OperationJob Job=>session.Job;
     internal RecoveryLease Recovery {get;}
+    private readonly string scopeOwner;
+    private readonly bool includeCollaborators;
     internal HashSet<string> FailedRepositories {get;}=[];
     internal Dictionary<string,(RepositoryDescriptor Repository,bool Wiki)> OwnedStaging {get;}=[];
     internal bool ConsistencyPending {get;set;}
     private bool disposed;
-    private BackupRunContext(PreflightSession session,OperationLockLease owner,IReadOnlyList<RepositoryDescriptor> mappings,string runId)
-    {this.session=session;Owner=owner;Repositories=mappings;RunId=runId;Recovery=session.MintRecoveryLease();}
-    internal static BackupRunContext Create(PreflightSession session,OperationLockLease owner,IReadOnlyList<RepositoryDescriptor> mappings,string runId)
+    private BackupRunContext(PreflightSession session,OperationLockLease owner,IReadOnlyList<RepositoryDescriptor> mappings,string runId,
+        string scopeOwner,bool includeCollaborators)
+    {this.session=session;Owner=owner;Repositories=mappings;RunId=runId;this.scopeOwner=scopeOwner;this.includeCollaborators=includeCollaborators;Recovery=session.MintRecoveryLease();}
+    internal static BackupRunContext Create(PreflightSession session,OperationLockLease owner,IReadOnlyList<RepositoryDescriptor> mappings,string runId,
+        string scopeOwner = "", bool includeCollaborators = false)
     {
         session.Revalidate();RepositoryNameMapper.RequireReconciled(owner.RequireOwnerRoot(),mappings);RequireRunId(runId);
         if(!session.Snapshot.Report.CanStartBackup)throw new InvalidOperationException("BACKUP_SESSION_INVALID");
         if(session.Snapshot.ChildEnvironment is not RuntimeEnvironment environment
             ||!string.Equals(environment.AuthenticatedLogin,Path.GetFileName(owner.RequireOwnerRoot()),StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("BACKUP_OWNER_SESSION_MISMATCH");
-        return new(session,owner,mappings,runId);
+        if (scopeOwner.Length > 0 && !AuthConfigLease.IsLogin(scopeOwner)) throw new ArgumentException("REPOSITORY_SCOPE_INVALID");
+        return new(session,owner,mappings,runId,scopeOwner,includeCollaborators);
     }
     internal static void RequireRunId(string runId)
     {if(string.IsNullOrEmpty(runId)||runId.Length>100||runId.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c is not ('-' or '_')))throw new ArgumentException("BACKUP_RUN_ID_INVALID");}
@@ -56,7 +61,11 @@ internal sealed class BackupRunContext : IAsyncDisposable
     {
         string owner=Path.GetFileName(OwnerRoot);
         string[] name=repository.NameWithOwner.Split('/');
-        var endpoint=RepositoryEndpointPolicy.ValidateAndCreate(owner,name.Length==2?name[0]:"",repository.Name,repository.NameWithOwner,repository.Url);
+        string remoteOwner = name.Length == 2 ? name[0] : "";
+        bool allowExternal = includeCollaborators || scopeOwner.Length > 0;
+        var endpoint = allowExternal
+            ? RepositoryEndpointPolicy.ValidateAndCreateForScope(owner, remoteOwner, repository.Name, repository.NameWithOwner, repository.Url)
+            : RepositoryEndpointPolicy.ValidateAndCreate(owner, remoteOwner, repository.Name, repository.NameWithOwner, repository.Url);
         if(!endpoint.Allowed)
         {
             if(recovery)return "https://github.com/"+owner+"/recovery.git";
