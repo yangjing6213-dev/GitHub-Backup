@@ -1,6 +1,13 @@
+![GitHub Backup cover: Keep a local copy of your AI projects](docs/assets/cover-en.png)
+
 # GitHub Backup
 
 [简体中文](README.md) | [English](README.en.md)
+
+[![Source code license: MIT](https://img.shields.io/badge/Source%20license-MIT-yellow.svg?style=for-the-badge)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg?style=for-the-badge&logo=.net&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
+[![C#](https://img.shields.io/badge/C%23-%23239120.svg?style=for-the-badge&logo=csharp&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D6.svg?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
 
 > **You made something with AI. Keep a local copy, too.** If your GitHub account is suspended or inaccessible, you may not be able to retrieve the projects stored there. Back up your own repositories and version history while you still have access to reduce the risk of losing them.
 >
