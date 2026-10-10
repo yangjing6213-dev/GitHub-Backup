@@ -1,6 +1,13 @@
+![GitHub Backup 中文封面：给 AI 项目多留一份本地副本](docs/assets/cover-zh.png)
+
 # GitHub Backup｜GitHub 备份工具
 
 [简体中文](README.md) | [English](README.en.md)
+
+[![源码许可证：MIT](https://img.shields.io/badge/Source%20license-MIT-yellow.svg?style=for-the-badge)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg?style=for-the-badge&logo=.net&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
+[![C#](https://img.shields.io/badge/C%23-%23239120.svg?style=for-the-badge&logo=csharp&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D6.svg?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/yangjing6213-dev/GitHub-Backup/blob/main/src/GitHubBackup.App/GitHubBackup.App.csproj)
 
 > **AI 帮你做出作品，别让它只留在 GitHub。** 如果 GitHub 账号被封控或无法登录，项目文件可能也取不回来。趁账号还能访问，先把自己的仓库和版本记录备份到电脑，多留一份，降低项目丢失的风险。
 >
