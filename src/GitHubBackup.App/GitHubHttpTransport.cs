@@ -29,7 +29,7 @@ internal sealed class GitHubRequest
     {
         if (!AuthConfigLease.IsLogin(authenticatedOwner)) throw new ArgumentException("HTTP_REPOSITORY_IDENTITY_INVALID");
         if (collaborators)
-            return new(null, authenticatedOwner, "/user/repos", "affiliation=collaborator&per_page=100", true, ValidPage(page));
+            return new(null, authenticatedOwner, "/user/repos", "affiliation=owner,collaborator&per_page=100", true, ValidPage(page));
         if (string.IsNullOrWhiteSpace(scopeOwner) || string.Equals(scopeOwner, authenticatedOwner, StringComparison.OrdinalIgnoreCase))
             return ForOwnedRepositories(authenticatedOwner, page);
         if (!AuthConfigLease.IsLogin(scopeOwner)) throw new ArgumentException("HTTP_REPOSITORY_SCOPE_INVALID");

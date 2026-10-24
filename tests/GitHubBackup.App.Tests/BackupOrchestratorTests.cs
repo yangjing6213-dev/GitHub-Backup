@@ -8,6 +8,19 @@ namespace GitHubBackup.App.Tests;
 public sealed class BackupOrchestratorTests
 {
     [TestMethod]
+    public async Task Empty_repository_discovery_is_not_reported_as_success()
+    {
+        await using var f = await OrchestrationFixture.CreateAsync(emptyDiscovery: true);
+
+        BackupRunResult result = await f.Orchestrator.RunAsync(f.Request(BackupMode.Daily), default);
+
+        Assert.AreEqual(RunStatus.Fail, result.Summary.Status);
+        Assert.AreEqual(0, result.Summary.RepositoryCount);
+        Assert.AreEqual("NO_REPOSITORIES_FOUND", result.Summary.ErrorCode);
+        Assert.HasCount(0, f.Git.Requests);
+    }
+
+    [TestMethod]
     [DataRow(false, "clone")][DataRow(true, "clone")]
     [DataRow(false, "fetch")][DataRow(true, "fetch")]
     [DataRow(false, "core-fsck")][DataRow(true, "core-fsck")]

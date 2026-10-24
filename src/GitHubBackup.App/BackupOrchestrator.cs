@@ -200,6 +200,13 @@ internal sealed class BackupOrchestrator(IProcessRunner runner, AppPaths paths,
                 var requirement = DiskSpacePolicy.Calculate(request.Mode, current, sizes, changed);
                 phase = "space";
                 RequireSpace(requirement.RequiredFreeBytes);
+                if (repositoryCount == 0)
+                {
+                    phase = "discovery";
+                    error = "NO_REPOSITORIES_FOUND";
+                    summary = Summary();
+                    return new(summary, false);
+                }
                 token.ThrowIfCancellationRequested(); session.Revalidate();
                 phase = "initialize";
                 writesStarted = true;

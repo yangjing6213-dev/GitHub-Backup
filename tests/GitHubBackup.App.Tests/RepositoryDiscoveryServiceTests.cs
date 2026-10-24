@@ -42,13 +42,16 @@ public sealed class RepositoryDiscoveryServiceTests
     public async Task Explicit_collaborator_scope_accepts_a_different_owner()
     {
         Assert.IsTrue(RepositoryEndpointPolicy.ValidateAndCreateForScope("fixture-user", "partner", "repo", "partner/repo", "https://github.com/partner/repo").Allowed);
-        var transport = new FixtureTransport(_ => ("[" + Item(1, 42, "partner", "repo") + "]", null));
+        var transport = new FixtureTransport(_ => ("[" + Item(1, 7, "fixture-user", "owned") + ","
+            + Item(2, 42, "partner", "repo") + "]", null));
 
         IReadOnlyList<RepositoryDescriptor> found = await new RepositoryDiscoveryService(transport)
             .DiscoverAsync("fixture-user", "", true, default);
 
-        Assert.AreEqual("partner/repo", found.Single().NameWithOwner);
+        Assert.HasCount(2, found);
+        CollectionAssert.AreEquivalent(new[] { "fixture-user/owned", "partner/repo" }, found.Select(repository => repository.NameWithOwner).ToArray());
         Assert.AreEqual("/user/repos", transport.Paths.Single());
+        Assert.AreEqual("affiliation=owner,collaborator&per_page=100", transport.Queries.Single());
     }
 
     [TestMethod]
@@ -126,14 +129,17 @@ public sealed class RepositoryDiscoveryServiceTests
     {
         internal int[] Pages => pages.ToArray();
         internal IReadOnlyList<string> Paths => paths;
+        internal IReadOnlyList<string> Queries => queries;
         private readonly List<int> pages = [];
         private readonly List<string> paths = [];
+        private readonly List<string> queries = [];
         public string BoundLogin => "fixture-user";
         public long BoundAccountId => 7;
         public Task<GitHubResponse> SendAsync(GitHubRequest request, CancellationToken token)
         {
             pages.Add(request.Page);
             paths.Add(request.Path);
+            queries.Add(request.FixedQuery);
             var (body, next) = response(request.Page);
             return Task.FromResult(new GitHubResponse(200, declaredLength is null ? new Dictionary<string,string>()
                 : new Dictionary<string,string> { ["Content-Length"] = declaredLength.Value.ToString() },
