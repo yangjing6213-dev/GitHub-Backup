@@ -33,7 +33,8 @@ public sealed class ToolingTests
         ToolInventory result = await detector.DetectAsync(job, default);
         if (hasFallback) Assert.AreEqual(fallback, result.GitHubCli?.AbsolutePath);
         else Assert.IsNull(result.GitHubCli);
-        Assert.AreEqual("TOOL_VERSION_PROBE_FAILED", detector.Errors[DependencyId.GitHubCli]);
+        if (hasFallback) Assert.IsFalse(detector.Errors.ContainsKey(DependencyId.GitHubCli));
+        else Assert.AreEqual("TOOL_VERSION_PROBE_FAILED", detector.Errors[DependencyId.GitHubCli]);
         Assert.HasCount(hasFallback ? 2 : 1, runner.Requests);
     }
 
@@ -94,22 +95,37 @@ public sealed class ToolingTests
     }
 
     [TestMethod]
-    [DataRow("valid", true)] [DataRow("ambiguous", false)] [DataRow("unsafe", false)] [DataRow("manifest", false)]
+    [DataRow("valid", true)] [DataRow("valid-v3-desktop", true)] [DataRow("ambiguous", false)] [DataRow("unsafe", false)] [DataRow("manifest", false)]
     public async Task Supported_winget_package_alias_is_resolved_then_trusted(string variant, bool allowed)
     {
         using var fixture = await TestToolBuilder.CreateAsync();
         string installation = Path.Combine(fixture.Root, "package"); AclPolicy.CreateRestrictedDirectory(installation, WindowsIdentity.GetCurrent().User!);
         File.Copy(fixture.Executable, Path.Combine(installation, "winget.exe"));
-        File.WriteAllText(Path.Combine(installation, "AppxManifest.xml"), """
+        string manifest = variant == "valid-v3-desktop" ? """
+            <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10">
+            <Identity Name="Microsoft.DesktopAppInstaller" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="1.29.379.0" ProcessorArchitecture="x64"/>
+            <Applications><Application Id="winget" Executable="winget.exe"><Extensions><uap3:Extension Category="windows.appExecutionAlias"><uap3:AppExecutionAlias><desktop:ExecutionAlias Alias="winget.exe"/></uap3:AppExecutionAlias></uap3:Extension></Extensions></Application></Applications></Package>
+            """ : """
             <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10/5">
             <Identity Name="Microsoft.DesktopAppInstaller" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="1.29.379.0" ProcessorArchitecture="x64"/>
             <Applications><Application Id="winget" Executable="winget.exe"><Extensions><uap:Extension Category="windows.appExecutionAlias"><uap:AppExecutionAlias><uap:ExecutionAlias Alias="winget.exe"/></uap:AppExecutionAlias></uap:Extension></Extensions></Application></Applications></Package>
-            """.Replace("Alias=\"winget.exe\"", variant == "manifest" ? "Alias=\"evil.exe\"" : "Alias=\"winget.exe\""));
+            """.Replace("Alias=\"winget.exe\"", variant == "manifest" ? "Alias=\"evil.exe\"" : "Alias=\"winget.exe\"");
+        File.WriteAllText(Path.Combine(installation, "AppxManifest.xml"), manifest);
         if (variant == "unsafe") StorageTestRoot.Grant(installation, FileSystemRights.CreateFiles);
         var package = new RegisteredWingetPackage("Microsoft.DesktopAppInstaller_1.29.379.0_x64__8wekyb3d8bbwe", installation);
         var resolver = new WingetPackageResolver(() => variant == "ambiguous" ? [package, package] : [package]);
         if (allowed) Assert.AreEqual(Path.Combine(installation, "winget.exe"), resolver.Resolve());
         else Assert.ThrowsExactly<IOException>(() => resolver.Resolve());
+    }
+
+    [TestMethod]
+    public async Task Package_shaped_path_cannot_claim_windows_registered_winget_identity()
+    {
+        using var fixture = await TestToolBuilder.CreateAsync();
+        string executable = Path.Combine(fixture.Root, "winget.exe");
+        var package = new RegisteredWingetPackage("Microsoft.DesktopAppInstaller_1.29.379.0_x64__8wekyb3d8bbwe", fixture.Root, true);
+        var failure = Assert.ThrowsExactly<IOException>(() => new ToolPathPolicy().CaptureRegisteredPackageExecutable(executable, package));
+        Assert.AreEqual("PROCESS_EXECUTABLE_PACKAGE_REJECTED", failure.Message);
     }
 
     [TestMethod]

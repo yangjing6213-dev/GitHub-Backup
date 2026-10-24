@@ -8,11 +8,17 @@ using System.Xml.Linq;
 namespace GitHubBackup.App;
 
 internal enum DependencyId { Git, GitHubCli, GitLfs, Winget }
-internal sealed record RegisteredWingetPackage(string FullName, string Path);
+internal sealed record RegisteredWingetPackage(string FullName, string Path, bool IsWindowsRegistered = false)
+{
+    internal string ExecutablePath => System.IO.Path.Combine(Path, "winget.exe");
+}
 internal sealed class WingetPackageResolver(Func<IReadOnlyList<RegisteredWingetPackage>>? packages = null)
 {
     private const string Family = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe";
-    internal string Resolve()
+    private const string Publisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+    internal string Resolve() => ResolvePackage().ExecutablePath;
+
+    internal RegisteredWingetPackage ResolvePackage()
     {
         try
         {
@@ -23,32 +29,69 @@ internal sealed class WingetPackageResolver(Func<IReadOnlyList<RegisteredWingetP
             if (!name.Success) throw new IOException("TOOL_ALIAS_PACKAGE_REJECTED");
             string directory = NativeFileSystem.CanonicalPath(package.Path);
             string manifest = Path.Combine(directory, "AppxManifest.xml");
-            // The package API and manifest are candidate sources, not trust bypasses.
-            // Unreadable WindowsApps ancestor descriptors remain a blocking failure.
-            using var manifestLease = ExecutableTrust.Acquire(manifest, null);
-            using var handle = NativeFileSystem.Open(manifest);
-            NativeFileSystem.Inspect(handle, manifest, false);
-            using var stream = new FileStream(handle, FileAccess.Read);
-            using var xml = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 1024 * 1024 });
-            XElement root = XElement.Load(xml);
+            XElement root;
+            if (package.IsWindowsRegistered)
+            {
+                if (!IsCurrentRegisteredPackage(package.FullName, directory)
+                    || (File.GetAttributes(manifest) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("TOOL_ALIAS_PACKAGE_REJECTED");
+                // Read the immutable, OS-registered package files without asking a
+                // standard user for READ_CONTROL on protected WindowsApps parents.
+                using var stream = File.OpenRead(manifest);
+                root = ReadManifest(stream);
+            }
+            else
+            {
+                // Fixture or other candidate sources still need the normal strict
+                // path and ACL checks. A package-shaped manifest alone is not trust.
+                using var manifestLease = ExecutableTrust.Acquire(manifest, null);
+                using var handle = NativeFileSystem.Open(manifest);
+                NativeFileSystem.Inspect(handle, manifest, false);
+                using var stream = new FileStream(handle, FileAccess.Read);
+                root = ReadManifest(stream);
+            }
             XNamespace foundation = "http://schemas.microsoft.com/appx/manifest/foundation/windows10";
-            XNamespace aliases = "http://schemas.microsoft.com/appx/manifest/uap/windows10/5";
+            XNamespace aliases3 = "http://schemas.microsoft.com/appx/manifest/uap/windows10/3";
+            XNamespace aliases5 = "http://schemas.microsoft.com/appx/manifest/uap/windows10/5";
+            XNamespace desktop = "http://schemas.microsoft.com/appx/manifest/desktop/windows10";
             XElement? identity = root.Element(foundation + "Identity");
             if (root.Name != foundation + "Package" || identity?.Attribute("Name")?.Value != "Microsoft.DesktopAppInstaller"
-                || identity.Attribute("Publisher")?.Value != "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+                || identity.Attribute("Publisher")?.Value != Publisher
                 || identity.Attribute("Version")?.Value != name.Groups[1].Value || identity.Attribute("ProcessorArchitecture")?.Value != "x64")
                 throw new IOException("TOOL_ALIAS_MANIFEST_REJECTED");
             XElement[] applications = root.Element(foundation + "Applications")?.Elements(foundation + "Application").Where(x => x.Attribute("Id")?.Value == "winget").ToArray() ?? [];
-            if (applications.Length != 1 || applications[0].Attribute("Executable")?.Value != "winget.exe"
-                || applications[0].Element(foundation + "Extensions")?.Elements(aliases + "Extension").Any(x => x.Attribute("Category")?.Value == "windows.appExecutionAlias"
-                    && x.Element(aliases + "AppExecutionAlias")?.Elements(aliases + "ExecutionAlias").Any(a => a.Attribute("Alias")?.Value == "winget.exe") == true) != true)
+            bool alias = applications.Length == 1 && applications[0].Element(foundation + "Extensions")?.Elements()
+                .Any(extension => extension.Attribute("Category")?.Value == "windows.appExecutionAlias"
+                    && ((extension.Name == aliases3 + "Extension"
+                            && extension.Element(aliases3 + "AppExecutionAlias")?.Elements(desktop + "ExecutionAlias").Any(a => a.Attribute("Alias")?.Value == "winget.exe") == true)
+                        || (extension.Name == aliases5 + "Extension"
+                            && extension.Element(aliases5 + "AppExecutionAlias")?.Elements(aliases5 + "ExecutionAlias").Any(a => a.Attribute("Alias")?.Value == "winget.exe") == true))) == true;
+            if (applications.Length != 1 || applications[0].Attribute("Executable")?.Value != "winget.exe" || !alias)
                 throw new IOException("TOOL_ALIAS_MANIFEST_REJECTED");
-            string executable = Path.Combine(directory, "winget.exe");
-            ExecutableTrust.CaptureTrustedIdentity(executable);
-            return executable;
+            var resolved = package with { Path = directory };
+            if (!resolved.IsWindowsRegistered) ExecutableTrust.CaptureTrustedIdentity(resolved.ExecutablePath);
+            return resolved;
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or XmlException or PathBoundaryException) { throw new IOException("TOOL_ALIAS_TRUST_REJECTED"); }
     }
+
+    private static XElement ReadManifest(Stream stream)
+    {
+        using var xml = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 1024 * 1024 });
+        return XElement.Load(xml);
+    }
+
+    internal static bool IsCurrentRegisteredPackage(string fullName, string canonicalPath)
+    {
+        try
+        {
+            var current = RegisteredPackages();
+            return current.Count == 1 && current[0].FullName == fullName
+                && string.Equals(NativeFileSystem.CanonicalPath(current[0].Path), canonicalPath, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
+
     private static IReadOnlyList<RegisteredWingetPackage> RegisteredPackages()
     {
         uint count = 0, length = 0;
@@ -67,7 +110,7 @@ internal sealed class WingetPackageResolver(Func<IReadOnlyList<RegisteredWingetP
                 if (GetPackagePathByFullName(full, ref pathLength, null) != 122 || pathLength > 32768) throw new IOException("TOOL_ALIAS_QUERY_FAILED");
                 var path = new StringBuilder((int)pathLength);
                 if (GetPackagePathByFullName(full, ref pathLength, path) != 0) throw new IOException("TOOL_ALIAS_QUERY_FAILED");
-                result.Add(new(full, path.ToString()));
+                result.Add(new(full, path.ToString(), true));
             }
             return result;
         }
@@ -148,12 +191,7 @@ internal sealed class ToolPathPolicy(string? currentDirectory = null, string? ba
     }
     internal ExecutableIdentity Capture(string path)
     {
-        string canonical = NativeFileSystem.CanonicalPath(path);
-        string current = NativeFileSystem.CanonicalPath(currentDirectory ?? Environment.CurrentDirectory);
-        string backup = NativeFileSystem.CanonicalPath(backupRoot ?? AppSettings.Default.BackupRoot);
-        if (string.Equals(Path.GetDirectoryName(canonical), current, StringComparison.OrdinalIgnoreCase)
-            || canonical.StartsWith(backup + "\\", StringComparison.OrdinalIgnoreCase)) throw new IOException("TOOL_PATH_LOCAL_CANDIDATE_REJECTED");
-        if (!string.Equals(Path.GetExtension(canonical), ".exe", StringComparison.OrdinalIgnoreCase)) throw new IOException("TOOL_FILE_TYPE_REJECTED");
+        string canonical = ValidateCandidate(path);
         try
         {
             // Assign diagnostics to the failing role, while the final capture retains
@@ -170,6 +208,25 @@ internal sealed class ToolPathPolicy(string? currentDirectory = null, string? ba
         }
         catch (PathBoundaryException ex) { throw new IOException("TOOL_PATH_" + ex.Code); }
     }
+
+    internal ExecutableIdentity CaptureRegisteredPackageExecutable(string path, RegisteredWingetPackage package)
+    {
+        string canonical = ValidateCandidate(path);
+        if (!package.IsWindowsRegistered || !string.Equals(canonical, package.ExecutablePath, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("TOOL_ALIAS_PACKAGE_REJECTED");
+        return ExecutableTrust.CaptureRegisteredPackageIdentity(canonical, package);
+    }
+
+    private string ValidateCandidate(string path)
+    {
+        string canonical = NativeFileSystem.CanonicalPath(path);
+        string current = NativeFileSystem.CanonicalPath(currentDirectory ?? Environment.CurrentDirectory);
+        string backup = NativeFileSystem.CanonicalPath(backupRoot ?? AppSettings.Default.BackupRoot);
+        if (string.Equals(Path.GetDirectoryName(canonical), current, StringComparison.OrdinalIgnoreCase)
+            || canonical.StartsWith(backup + "\\", StringComparison.OrdinalIgnoreCase)) throw new IOException("TOOL_PATH_LOCAL_CANDIDATE_REJECTED");
+        if (!string.Equals(Path.GetExtension(canonical), ".exe", StringComparison.OrdinalIgnoreCase)) throw new IOException("TOOL_FILE_TYPE_REJECTED");
+        return canonical;
+    }
 }
 internal sealed class ToolDetector(IProcessRunner runner, IReadOnlyDictionary<string,string?> environment,
     Func<DependencyId,IEnumerable<string>>? candidates = null, ToolPathPolicy? policy = null)
@@ -181,7 +238,16 @@ internal sealed class ToolDetector(IProcessRunner runner, IReadOnlyDictionary<st
         foreach (DependencyId id in Enum.GetValues<DependencyId>())
         {
             string[] paths;
-            try { paths = (candidates ?? KnownCandidates)(id).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(); }
+            RegisteredWingetPackage? registeredWinget = null;
+            try
+            {
+                if (id == DependencyId.Winget && candidates is null)
+                {
+                    registeredWinget = new WingetPackageResolver().ResolvePackage();
+                    paths = [registeredWinget.ExecutablePath];
+                }
+                else paths = (candidates ?? KnownCandidates)(id).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Errors[id] = "TOOL_ALIAS_TRUST_REJECTED"; continue; }
             foreach (string candidate in paths)
             {
@@ -190,7 +256,10 @@ internal sealed class ToolDetector(IProcessRunner runner, IReadOnlyDictionary<st
                 try
                 {
                     string path = NativeFileSystem.CanonicalPath(candidate);
-                    ExecutableIdentity identity = (policy ?? new()).Capture(path);
+                    ToolPathPolicy pathPolicy = policy ?? new();
+                    ExecutableIdentity identity = registeredWinget is null
+                        ? pathPolicy.Capture(path)
+                        : pathPolicy.CaptureRegisteredPackageExecutable(path, registeredWinget);
                     context = await GitRuntimeContext.CreatePublicProbeAsync(environment, token).ConfigureAwait(false);
                     var child = ChildEnvironmentBuilder.Build(context.Environment, new Dictionary<string,string?> { ["GH_CONFIG_DIR"] = context.EmptyHooksDirectory });
                     string working = Path.GetDirectoryName(child["GIT_CONFIG_GLOBAL"])!;
@@ -201,7 +270,7 @@ internal sealed class ToolDetector(IProcessRunner runner, IReadOnlyDictionary<st
                     string raw = string.Join("\n", result.StandardOutput).TrimEnd('\r', '\n');
                     var detection = new ToolDetection(path, identity, raw, VersionPolicy.IsSupported(id, raw));
                     if (!found.ContainsKey(id) || detection.IsSupported) found[id] = detection;
-                    if (detection.IsSupported) break;
+                    if (detection.IsSupported) { Errors.Remove(id); break; }
                     Errors[id] = "TOOL_VERSION_UNSUPPORTED";
                 }
                 catch (GitRuntimeCleanupException) { throw; }
@@ -230,7 +299,7 @@ internal sealed class ToolDetector(IProcessRunner runner, IReadOnlyDictionary<st
     }
     private static IEnumerable<string> KnownCandidates(DependencyId id)
     {
-        if (id == DependencyId.Winget) { yield return new WingetPackageResolver().Resolve(); yield break; }
+        if (id == DependencyId.Winget) yield break;
         string name = id switch { DependencyId.Git => "git.exe", DependencyId.GitHubCli => "gh.exe", DependencyId.GitLfs => "git-lfs.exe", _ => "winget.exe" };
         string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (id == DependencyId.Git) yield return Path.Combine(programFiles, "Git", "cmd", name);

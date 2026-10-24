@@ -4,7 +4,8 @@ internal enum BackupMode { Daily, Full }
 internal enum NetworkMode { Auto }
 internal enum RunStatus { Pass, Partial, Fail, Cancelled }
 
-internal sealed record ExecutableIdentity(uint VolumeSerialNumber, ulong FileIndex, long Length, long LastWriteTimeUtcTicks);
+internal sealed record ExecutableIdentity(uint VolumeSerialNumber, ulong FileIndex, long Length, long LastWriteTimeUtcTicks,
+    string? AppPackageFullName = null, string? AppPackagePath = null);
 internal sealed record ToolDetection(string AbsolutePath, ExecutableIdentity Identity, string RawVersion, bool IsSupported);
 internal enum ProcessOutputMode { TextTail, EphemeralText, CapturedFile, BinaryFile }
 internal sealed record ProcessRequest(string FilePath, IReadOnlyList<string> Arguments, string WorkingDirectory,

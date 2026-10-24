@@ -20,6 +20,13 @@ internal static class ExecutableTrust
     // alive across CreateProcess. A value-only identity check cannot pin an image.
     internal static ExecutableLease Acquire(string absolutePath, ExecutableIdentity? expected)
     {
+        if (expected is { AppPackageFullName: not null } packageExpected)
+        {
+            if (packageExpected.AppPackagePath is null)
+                throw new IOException("PROCESS_EXECUTABLE_PACKAGE_IDENTITY_INVALID");
+            return AcquireRegisteredPackageExecutable(absolutePath, packageExpected.AppPackageFullName!, packageExpected.AppPackagePath, packageExpected);
+        }
+        if (expected?.AppPackagePath is not null) throw new IOException("PROCESS_EXECUTABLE_PACKAGE_IDENTITY_INVALID");
         string canonical = NativeFileSystem.CanonicalPath(absolutePath);
         if (!string.Equals(canonical, absolutePath, StringComparison.OrdinalIgnoreCase)
             || new DriveInfo(Path.GetPathRoot(canonical)!).DriveType != DriveType.Fixed)
@@ -42,6 +49,41 @@ internal static class ExecutableTrust
             return lease;
         }
         catch { lease.Dispose(); throw; }
+    }
+
+    internal static ExecutableIdentity CaptureRegisteredPackageIdentity(string absolutePath, RegisteredWingetPackage package)
+    {
+        using var lease = AcquireRegisteredPackageExecutable(absolutePath, package.FullName, package.Path, null);
+        return lease.Identity;
+    }
+
+    private static ExecutableLease AcquireRegisteredPackageExecutable(string absolutePath, string packageFullName,
+        string packagePath, ExecutableIdentity? expected)
+    {
+        string canonical = NativeFileSystem.CanonicalPath(absolutePath);
+        string canonicalPackagePath = NativeFileSystem.CanonicalPath(packagePath);
+        if (!WingetPackageResolver.IsCurrentRegisteredPackage(packageFullName, canonicalPackagePath)
+            || !string.Equals(canonical, Path.Combine(canonicalPackagePath, "winget.exe"), StringComparison.OrdinalIgnoreCase)
+            || new DriveInfo(Path.GetPathRoot(canonical)!).DriveType != DriveType.Fixed)
+            throw new IOException("PROCESS_EXECUTABLE_PACKAGE_REJECTED");
+
+        // Windows protects registered package files as read-only and prevents launch
+        // if they are altered. Normal users can execute/read the image but cannot
+        // obtain READ_CONTROL on every WindowsApps ancestor, so use a read-only
+        // image handle and bind its identity to the OS package registration.
+        SafeFileHandle handle = File.OpenHandle(canonical, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var lease = new ExecutableLease();
+        try
+        {
+            NativeFileIdentity native = NativeFileSystem.InspectExecutable(handle, canonical);
+            var identity = new ExecutableIdentity(native.VolumeSerialNumber, native.FileIndex,
+                RandomAccess.GetLength(handle), File.GetLastWriteTimeUtc(handle).Ticks, packageFullName, canonicalPackagePath);
+            if (expected is not null && expected != identity) throw new IOException("PROCESS_EXECUTABLE_IDENTITY_CHANGED");
+            lease.Handles.Add(handle);
+            lease.Identity = identity;
+            return lease;
+        }
+        catch { handle.Dispose(); lease.Dispose(); throw; }
     }
 
     internal static void CheckDescriptor(RawSecurityDescriptor descriptor, bool installationOrFile)
