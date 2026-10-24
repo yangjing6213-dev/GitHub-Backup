@@ -2,17 +2,16 @@
 
 This document is a public summary, not the original machine/account diagnostic log and not an authorization receipt for installer acceptance.
 
-## Current follow-up status — 2026-10-07
+## Current follow-up status — 2026-10-25
 
-This section supersedes the historical snapshots below for the current v5 build. The unsigned preview is published as [setup-preview-20261007-v5](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v5), with the installer and a separate checksum file.
+This section supersedes the historical snapshots below for the current v5 preview package. The installer and separate checksum asset on [setup-preview-20261007-v5](https://github.com/yangjing6213-dev/GitHub-Backup/releases/tag/setup-preview-20261007-v5) were refreshed from source commit `9e1ec01962b7ebbf64ee82f97403336be40aa502`; the existing release tag was left in place.
 
-- Installer artifact: `GitHubBackup-setup.exe`, 93,358,801 bytes, SHA-256 `40F0C458F3A97F9DEB97088FD11A51E695014EE467B2D88284F1E8092D1713DB`.
-- Bundled app: self-contained Windows x64 executable, 117,487,776 bytes, SHA-256 `302B5F16C1FF14324BB32287A2C27ACD050B840DC04320454A7BDED4C8D30375`. Installer and app static verification: PASS. The installer is unsigned.
-- Local replacement: the previous installed version was uninstalled with exit code 0; its install directory, start-menu shortcut, and uninstall registration were removed. The v5 installer exited with code 0 and installed four owned files; hashes, start-menu shortcut, uninstall registration, and committed receipt passed verification. Existing settings hash `1E1033DAE5A6AB2DB59800A35BB572E387C5D18FC07E2D4125796148D0A79F23` was unchanged.
-- Source verification: full MSTest suite 1,199 passed, 0 failed, 31 skipped (1,230 total); Release x64 rebuild 0 warnings / 0 errors; single-file verifier PASS; `git diff --check` PASS after documentation updates.
-- Iteration capabilities included in this package: new-folder restore verification, rate-limit pause/resume checkpoints, daily/weekly startup schedule, second local copy, explicit organization/collaborator scope, and optional Actions logs/artifacts with per-repository limits.
-- Old package-only build directories were sent to the Windows Recycle Bin after file-count and scope checks; source, backups, settings, credentials, and the new v5 payload were not touched.
-- Clean-PC use, installation on other computers/accounts, real-account scope differences, and restoring a backup: NOT_RUN. A successful local installation does not establish compatibility with every network, account, or repository.
+- Installer artifact: `GitHubBackup-setup.exe`, 93,366,754 bytes, SHA-256 `3A4B6D662F6C727CEF10F1B7F5336A159ADF26CFA0EC0AAEB432D5E07872EE24`.
+- Bundled app: self-contained Windows x64 executable, 117,491,872 bytes, SHA-256 `534C2104B771867208967BE1D52B6B35AF00AF0EB42EE12CFE004A89DF56F2D3`. App and installer static verification: PASS. The installer is unsigned.
+- Local replacement: old uninstaller exit 0; new installer exit 0; four owned files and two shortcuts verified. The installed receipt names source commit `9e1ec01962b7ebbf64ee82f97403336be40aa502`. Settings, GitHub CLI configuration, and backup-directory metadata were unchanged.
+- Source verification: full MSTest suite 1,202 passed, 0 failed, 31 skipped (1,233 total); Release x64 publish 0 warnings / 0 errors; single-file verifier PASS; setup preflight and static/installed-file verification PASS. NSIS 3.12 completed with 13 warnings about unused alternate install/uninstall routines and variables.
+- Public asset metadata: GitHub reports the installer size and SHA-256 above, matching the local file. A direct download from this environment was not verified because the GitHub download service timed out.
+- The installed app was left closed for the user's manual test. Actual GitHub-account backup and restore, clean-PC use, and installation on other computers/accounts: NOT_RUN.
 - Compatibility note: a schema-2 older install is not upgraded in place; its existing `Uninstall.exe` must be run first. If a current uninstall registration is missing, uninstall can proceed after validating the files, but a repair/reinstall through that missing registration remains fail-closed.
 
 ## Historical snapshot — 2026-10-03 (superseded above)
