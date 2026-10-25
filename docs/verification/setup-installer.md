@@ -11,7 +11,7 @@ This section supersedes the historical snapshots below for the current v5 previe
 - Local replacement: old uninstaller exit 0; new installer exit 0; four owned files and two shortcuts verified. The installed receipt names source commit `9e1ec01962b7ebbf64ee82f97403336be40aa502`. Settings, GitHub CLI configuration, and backup-directory metadata were unchanged.
 - Source verification: full MSTest suite 1,202 passed, 0 failed, 31 skipped (1,233 total); Release x64 publish 0 warnings / 0 errors; single-file verifier PASS; setup preflight and static/installed-file verification PASS. NSIS 3.12 completed with 13 warnings about unused alternate install/uninstall routines and variables.
 - Public asset metadata: GitHub reports the installer size and SHA-256 above, matching the local file. A direct download from this environment was not verified because the GitHub download service timed out.
-- The installed app was left closed for the user's manual test. Actual GitHub-account backup and restore, clean-PC use, and installation on other computers/accounts: NOT_RUN.
+- User-reported manual test of the installed app's repository discovery and backup flow: PASS. Restore testing, clean-PC use, and installation on other computers/accounts: NOT_RUN.
 - Compatibility note: a schema-2 older install is not upgraded in place; its existing `Uninstall.exe` must be run first. If a current uninstall registration is missing, uninstall can proceed after validating the files, but a repair/reinstall through that missing registration remains fail-closed.
 
 ## Historical snapshot — 2026-10-03 (superseded above)
