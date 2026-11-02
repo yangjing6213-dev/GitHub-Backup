@@ -1,19 +1,29 @@
-![GitHub Backup cover: Keep a local copy of your AI projects](docs/assets/cover-en.png)
 
 # GitHub Backup — Keep a Local Copy of Your AI Projects
 
-[简体中文](README.md) | [English](README.en.md)
+> Back up GitHub repositories and supported project data locally, then verify or restore to a new location.
 
-[![Source license: MIT](https://img.shields.io/badge/Source%20license-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg?style=for-the-badge&logo=.net&logoColor=white)](src/GitHubBackup.App/GitHubBackup.App.csproj)
-[![C#](https://img.shields.io/badge/C%23-%23239120.svg?style=for-the-badge&logo=csharp&logoColor=white)](src/GitHubBackup.App/GitHubBackup.App.csproj)
-[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D6.svg?style=for-the-badge&logo=windows&logoColor=white)](src/GitHubBackup.App/GitHubBackup.App.csproj)
+![C#](https://img.shields.io/badge/C%23-239120?style=flat-square&logo=csharp&logoColor=white) ![.NET 10](https://img.shields.io/badge/.NET%2010-512BD4?style=flat-square&logo=dotnet&logoColor=white) ![Windows x64](https://img.shields.io/badge/Windows%20x64-0078D6?style=flat-square&logo=windows&logoColor=white) [![MIT (source only)](https://img.shields.io/badge/MIT%20(source%20only)-yellowgreen?style=flat-square)](LICENSE)
+
+
+![Project cover](assets/portfolio-promo-2026-11-02/cover-en.jpg)
+
+中文封面与配图：[Cover](assets/portfolio-promo-2026-11-02/cover-zh.jpg) · [Overview](assets/portfolio-promo-2026-11-02/overview-zh.jpg)
+
+[简体中文](README.md) | [English](README.en.md)
 
 > **Your AI-built project should not exist only behind one GitHub login.** While you can still access your account, save the repositories and project records you can reach to your computer. A local copy can reduce the risk of losing access if your account is suspended or unavailable.
 >
 > [See available downloads](https://github.com/yangjing6213-dev/GitHub-Backup/releases) · [Start a backup](#start-a-backup) · [Read before using](#read-before-using)
 >
 > **Back up in advance:** this app cannot unlock an account or retrieve files that were never backed up after access is lost.
+
+## Workflow diagram (AI concept illustration)
+### Workflow illustration (concept only)
+
+![Project workflow concept illustration](assets/portfolio-promo-2026-11-02/overview-en.jpg)
+
+> AI-generated concept illustration: workflow only, not a real interface, runtime data, or result.
 
 ## What does it do?
 
